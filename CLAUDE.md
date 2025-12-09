@@ -12,6 +12,13 @@ A screen measurement tool for Hyprland/Sway (wlroots-based compositors), inspire
 
 ## Architecture
 
+```
+src/
+  main.rs      - App state, Wayland handlers, entry point
+  capture.rs   - Screen capture via wlr-screencopy protocol
+  render.rs    - Edge detection + drawing with tiny-skia
+```
+
 - **Screen capture** at physical resolution (e.g., 2880x1920 for HiDPI)
 - **Pre-computed data** at startup:
   - `luminance[]` - grayscale values for edge detection
@@ -27,7 +34,7 @@ A screen measurement tool for Hyprland/Sway (wlroots-based compositors), inspire
    ```
 2. Move cursor to measure between detected edges
 3. Dimensions shown as `{width} x {height}` near cursor
-4. Press Escape or click to exit
+4. Press any key or click to exit
 
 ## Building
 
