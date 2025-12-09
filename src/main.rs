@@ -1015,6 +1015,10 @@ impl SeatHandler for PixelSnap {
                 }
             }
         }
+        if capability == Capability::Keyboard {
+            // Request keyboard to receive key events
+            let _ = self.seat_state.get_keyboard(qh, &seat, None);
+        }
     }
 
     fn remove_capability(
@@ -1059,11 +1063,10 @@ impl KeyboardHandler for PixelSnap {
         _qh: &QueueHandle<Self>,
         _keyboard: &wl_keyboard::WlKeyboard,
         _serial: u32,
-        event: KeyEvent,
+        _event: KeyEvent,
     ) {
-        if event.keysym == Keysym::Escape {
-            self.exit = true;
-        }
+        // Exit on any key press
+        self.exit = true;
     }
 
     fn release_key(
