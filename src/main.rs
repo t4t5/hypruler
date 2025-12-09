@@ -201,11 +201,9 @@ fn create_shm_fd() -> std::io::Result<OwnedFd> {
 }
 
 struct Screenshot {
-    data: Vec<u8>,
+    bgra_data: Vec<u8>, // Pre-converted to BGRA for fast canvas copy
     width: u32,
     height: u32,
-    stride: u32,
-    format: wl_shm::Format,
     luminance: Vec<u8>, // Pre-computed luminance for edge detection
 }
 
@@ -215,31 +213,6 @@ impl Screenshot {
             return 0;
         }
         self.luminance[(y * self.width + x) as usize]
-    }
-
-    fn get_pixel(&self, x: u32, y: u32) -> (u8, u8, u8, u8) {
-        if x >= self.width || y >= self.height {
-            return (0, 0, 0, 255);
-        }
-        let idx = (y * self.stride + x * 4) as usize;
-        if idx + 3 >= self.data.len() {
-            return (0, 0, 0, 255);
-        }
-        // Format is typically BGRA or ARGB
-        match self.format {
-            wl_shm::Format::Argb8888 | wl_shm::Format::Xrgb8888 => {
-                // ARGB: B G R A in little endian = B at idx+0, G at idx+1, R at idx+2, A at idx+3
-                (self.data[idx + 2], self.data[idx + 1], self.data[idx], self.data[idx + 3])
-            }
-            wl_shm::Format::Xbgr8888 | wl_shm::Format::Abgr8888 => {
-                // XBGR: R G B X
-                (self.data[idx], self.data[idx + 1], self.data[idx + 2], self.data[idx + 3])
-            }
-            _ => {
-                // Default assumption: BGRA
-                (self.data[idx + 2], self.data[idx + 1], self.data[idx], self.data[idx + 3])
-            }
-        }
     }
 }
 
@@ -312,23 +285,39 @@ fn capture_screen(conn: &Connection) -> Result<Screenshot, String> {
 
     let data = mmap.to_vec();
 
-    // Pre-compute luminance for fast edge detection
-    let mut luminance = vec![0u8; (format.width * format.height) as usize];
+    // Pre-compute luminance for fast edge detection AND convert to BGRA for fast canvas copy
+    let pixel_count = (format.width * format.height) as usize;
+    let mut luminance = vec![0u8; pixel_count];
+    let mut bgra_data = vec![0u8; pixel_count * 4];
+
     for y in 0..format.height {
         for x in 0..format.width {
-            let idx = (y * format.stride + x * 4) as usize;
-            if idx + 2 < data.len() {
+            let src_idx = (y * format.stride + x * 4) as usize;
+            let dst_idx = (y * format.width + x) as usize;
+
+            if src_idx + 3 < data.len() {
+                // Extract RGB based on source format
                 let (r, g, b) = match format.format {
                     wl_shm::Format::Argb8888 | wl_shm::Format::Xrgb8888 => {
-                        (data[idx + 2], data[idx + 1], data[idx])
+                        // BGRX in memory (little endian)
+                        (data[src_idx + 2], data[src_idx + 1], data[src_idx])
                     }
                     wl_shm::Format::Xbgr8888 | wl_shm::Format::Abgr8888 => {
-                        (data[idx], data[idx + 1], data[idx + 2])
+                        // RGBX in memory
+                        (data[src_idx], data[src_idx + 1], data[src_idx + 2])
                     }
-                    _ => (data[idx + 2], data[idx + 1], data[idx]),
+                    _ => (data[src_idx + 2], data[src_idx + 1], data[src_idx]),
                 };
-                luminance[(y * format.width + x) as usize] =
-                    (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) as u8;
+
+                // Compute luminance
+                luminance[dst_idx] = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) as u8;
+
+                // Convert to BGRA (Wayland's ARGB8888 format, which is BGRA in memory)
+                let bgra_idx = dst_idx * 4;
+                bgra_data[bgra_idx] = b;
+                bgra_data[bgra_idx + 1] = g;
+                bgra_data[bgra_idx + 2] = r;
+                bgra_data[bgra_idx + 3] = 255; // Full alpha
             }
         }
     }
@@ -339,11 +328,9 @@ fn capture_screen(conn: &Connection) -> Result<Screenshot, String> {
     frame.destroy();
 
     Ok(Screenshot {
-        data,
+        bgra_data,
         width: format.width,
         height: format.height,
-        stride: format.stride,
-        format: format.format,
         luminance,
     })
 }
@@ -467,7 +454,6 @@ struct PixelSnap {
     // Rendering optimization
     needs_redraw: bool,
     cached_pixmap: Option<Pixmap>,
-    background_rendered: bool, // Whether we've rendered the screenshot background
 
     // Screenshot data for edge detection
     screenshot: Screenshot,
@@ -504,7 +490,6 @@ impl PixelSnap {
             font: font.map(Arc::new),
             needs_redraw: true,
             cached_pixmap: None,
-            background_rendered: false,
             screenshot,
         }
     }
@@ -522,49 +507,18 @@ impl PixelSnap {
         self.needs_redraw = false;
 
         // Screenshot is already at physical resolution from screencopy
-        // The overlay should match the screenshot dimensions
         let phys_width = self.screenshot.width;
         let phys_height = self.screenshot.height;
         let scale = self.scale as f32;
 
-        // Create or reuse pixmap at screenshot resolution
-        let needs_new_pixmap = self.cached_pixmap.as_ref()
-            .map(|p| p.width() != phys_width || p.height() != phys_height)
-            .unwrap_or(true);
-
-        if needs_new_pixmap {
-            self.cached_pixmap = Pixmap::new(phys_width, phys_height);
-            self.background_rendered = false;
-        }
-
-        // Get values we need before borrowing pixmap mutably
+        // Get values we need
         let pointer_pos = self.pointer_pos;
         let screenshot = &self.screenshot;
         let font = self.font.clone();
-        let needs_background = !self.background_rendered;
-
-        let pixmap = self.cached_pixmap.as_mut().unwrap();
-
-        // Draw screenshot as background (only once, it's expensive)
-        if needs_background {
-            Self::draw_screenshot_background_static(pixmap, screenshot);
-        } else {
-            // Just restore the background by re-copying (faster than redrawing)
-            Self::draw_screenshot_background_static(pixmap, screenshot);
-        }
-        self.background_rendered = true;
 
         // The pointer position is in logical coordinates, convert to physical
         let cursor_phys_x = (pointer_pos.x * scale as f64) as u32;
         let cursor_phys_y = (pointer_pos.y * scale as f64) as u32;
-
-        // Edge detection uses physical coordinates (screenshot is at physical resolution)
-        if cursor_phys_x < screenshot.width && cursor_phys_y < screenshot.height {
-            let edges = find_edges(screenshot, cursor_phys_x, cursor_phys_y);
-            // All drawing is at physical resolution now
-            Self::draw_measurements_static(pixmap, &edges, cursor_phys_x, cursor_phys_y, font.as_ref());
-            Self::draw_crosshair_static(pixmap, cursor_phys_x as f32, cursor_phys_y as f32);
-        }
 
         // Copy to wayland buffer
         let pool = self.pool.as_mut().unwrap();
@@ -585,14 +539,52 @@ impl PixelSnap {
             )
             .expect("Failed to create buffer");
 
-        // Copy pixmap data to wayland buffer (RGBA -> BGRA conversion)
-        let pixmap_data = self.cached_pixmap.as_ref().unwrap().data();
-        for (i, chunk) in canvas[..size].chunks_exact_mut(4).enumerate() {
-            let src_idx = i * 4;
-            chunk[0] = pixmap_data[src_idx + 2]; // B
-            chunk[1] = pixmap_data[src_idx + 1]; // G
-            chunk[2] = pixmap_data[src_idx + 0]; // R
-            chunk[3] = pixmap_data[src_idx + 3]; // A
+        // FAST: Copy pre-converted BGRA background directly to canvas
+        let bgra_size = screenshot.bgra_data.len().min(size);
+        canvas[..bgra_size].copy_from_slice(&screenshot.bgra_data[..bgra_size]);
+
+        // Draw overlay (measurements, crosshair) on transparent pixmap
+        if cursor_phys_x < screenshot.width && cursor_phys_y < screenshot.height {
+            // Create or reuse overlay pixmap
+            let needs_new_pixmap = self.cached_pixmap.as_ref()
+                .map(|p| p.width() != phys_width || p.height() != phys_height)
+                .unwrap_or(true);
+
+            if needs_new_pixmap {
+                self.cached_pixmap = Pixmap::new(phys_width, phys_height);
+            }
+
+            let pixmap = self.cached_pixmap.as_mut().unwrap();
+            pixmap.fill(tiny_skia::Color::TRANSPARENT);
+
+            let edges = find_edges(screenshot, cursor_phys_x, cursor_phys_y);
+            Self::draw_measurements_static(pixmap, &edges, cursor_phys_x, cursor_phys_y, font.as_ref());
+            Self::draw_crosshair_static(pixmap, cursor_phys_x as f32, cursor_phys_y as f32);
+
+            // Composite overlay onto canvas (only non-transparent pixels)
+            let overlay_data = pixmap.data();
+            for (i, chunk) in canvas[..size].chunks_exact_mut(4).enumerate() {
+                let src_idx = i * 4;
+                let alpha = overlay_data[src_idx + 3];
+                if alpha > 0 {
+                    // Blend overlay onto background (RGBA -> BGRA with alpha blend)
+                    let src_r = overlay_data[src_idx] as u32;
+                    let src_g = overlay_data[src_idx + 1] as u32;
+                    let src_b = overlay_data[src_idx + 2] as u32;
+                    let src_a = alpha as u32;
+
+                    let dst_b = chunk[0] as u32;
+                    let dst_g = chunk[1] as u32;
+                    let dst_r = chunk[2] as u32;
+
+                    // Simple alpha blend: out = src * alpha + dst * (1 - alpha)
+                    let inv_a = 255 - src_a;
+                    chunk[0] = ((src_b * src_a + dst_b * inv_a) / 255) as u8;
+                    chunk[1] = ((src_g * src_a + dst_g * inv_a) / 255) as u8;
+                    chunk[2] = ((src_r * src_a + dst_r * inv_a) / 255) as u8;
+                    chunk[3] = 255;
+                }
+            }
         }
 
         let layer_surface = self.layer_surface.as_ref().unwrap();
@@ -602,25 +594,6 @@ impl PixelSnap {
         buffer.attach_to(surface).expect("Failed to attach buffer");
         surface.damage_buffer(0, 0, phys_width as i32, phys_height as i32);
         surface.commit();
-    }
-
-    fn draw_screenshot_background_static(pixmap: &mut Pixmap, screenshot: &Screenshot) {
-        let width = pixmap.width();
-        let height = pixmap.height();
-        let pixels = pixmap.pixels_mut();
-
-        // Direct copy - pixmap and screenshot are same size (physical resolution)
-        for y in 0..height.min(screenshot.height) {
-            for x in 0..width.min(screenshot.width) {
-                let (r, g, b, a) = screenshot.get_pixel(x, y);
-                let idx = (y * width + x) as usize;
-                if idx < pixels.len() {
-                    if let Some(pixel) = PremultipliedColorU8::from_rgba(r, g, b, a) {
-                        pixels[idx] = pixel;
-                    }
-                }
-            }
-        }
     }
 
     fn draw_measurements_static(pixmap: &mut Pixmap, edges: &Edges, cursor_x: u32, cursor_y: u32, font: Option<&Arc<fontdue::Font>>) {
