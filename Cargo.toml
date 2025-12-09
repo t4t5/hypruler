@@ -7,6 +7,7 @@ edition = "2021"
 smithay-client-toolkit = "0.19"
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 tiny-skia = "0.11"
 fontdue = "0.8"
 memmap2 = "0.9"

@@ -1,3 +1,5 @@
+use memmap2::MmapMut;
+use rustix::fs::{self, SealFlags};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_pointer,
@@ -7,7 +9,9 @@ use smithay_client_toolkit::{
     registry_handlers,
     seat::{
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
-        pointer::{PointerEvent, PointerEventKind, PointerHandler},
+        pointer::{
+            cursor_shape::CursorShapeManager, PointerEvent, PointerEventKind, PointerHandler,
+        },
         Capability, SeatHandler, SeatState,
     },
     shell::{
@@ -19,23 +23,29 @@ use smithay_client_toolkit::{
     },
     shm::{slot::SlotPool, Shm, ShmHandler},
 };
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::ffi::CString;
 use std::fs::File;
 use std::os::fd::{AsFd, OwnedFd};
-use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, PremultipliedColorU8, Stroke, Transform};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tiny_skia::{
+    Color, FillRule, Paint, PathBuilder, Pixmap, PremultipliedColorU8, Stroke, Transform,
+};
 use wayland_client::{
     globals::{registry_queue_init, GlobalListContents},
-    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_shm_pool, wl_surface, wl_buffer, wl_registry},
-    Connection, Dispatch, QueueHandle, Proxy,
+    protocol::{
+        wl_buffer, wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool,
+        wl_surface,
+    },
+    Connection, Dispatch, Proxy, QueueHandle,
+};
+use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{
+    self, WpCursorShapeDeviceV1,
 };
 use wayland_protocols_wlr::screencopy::v1::client::{
     zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
     zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
 };
-use memmap2::MmapMut;
-use rustix::fs::{self, SealFlags};
 
 const LINE_WIDTH: f32 = 2.0;
 const END_CAP_SIZE: f32 = 8.0;
@@ -88,7 +98,8 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for CaptureState {
         _data: &GlobalListContents,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-    ) {}
+    ) {
+    }
 }
 
 impl Dispatch<ZwlrScreencopyManagerV1, ()> for CaptureState {
@@ -99,7 +110,8 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for CaptureState {
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-    ) {}
+    ) {
+    }
 }
 
 impl Dispatch<ZwlrScreencopyFrameV1, ()> for CaptureState {
@@ -112,16 +124,22 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for CaptureState {
         _qh: &QueueHandle<Self>,
     ) {
         match event {
-            zwlr_screencopy_frame_v1::Event::Buffer { format, width, height, stride } => {
-                if let wayland_client::WEnum::Value(fmt) = format {
-                    // Prefer common formats
-                    if matches!(fmt, wl_shm::Format::Argb8888 | wl_shm::Format::Xrgb8888 | wl_shm::Format::Xbgr8888) {
-                        state.format = Some(FrameFormat { format: fmt, width, height, stride });
-                    } else if state.format.is_none() {
-                        state.format = Some(FrameFormat { format: fmt, width, height, stride });
-                    }
+            zwlr_screencopy_frame_v1::Event::Buffer {
+                format,
+                width,
+                height,
+                stride,
+            } => match format {
+                wayland_client::WEnum::Value(fmt) => {
+                    state.format = Some(FrameFormat {
+                        format: fmt,
+                        width,
+                        height,
+                        stride,
+                    });
                 }
-            }
+                wayland_client::WEnum::Unknown(_) => todo!(),
+            },
             zwlr_screencopy_frame_v1::Event::BufferDone => {
                 state.done.store(true, Ordering::SeqCst);
             }
@@ -144,7 +162,8 @@ impl Dispatch<wl_shm::WlShm, ()> for CaptureState {
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-    ) {}
+    ) {
+    }
 }
 
 impl Dispatch<wl_shm_pool::WlShmPool, ()> for CaptureState {
@@ -155,7 +174,8 @@ impl Dispatch<wl_shm_pool::WlShmPool, ()> for CaptureState {
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-    ) {}
+    ) {
+    }
 }
 
 impl Dispatch<wl_buffer::WlBuffer, ()> for CaptureState {
@@ -166,7 +186,8 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for CaptureState {
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-    ) {}
+    ) {
+    }
 }
 
 impl Dispatch<wl_output::WlOutput, ()> for CaptureState {
@@ -177,7 +198,8 @@ impl Dispatch<wl_output::WlOutput, ()> for CaptureState {
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-    ) {}
+    ) {
+    }
 }
 
 // ============================================================================
@@ -243,7 +265,8 @@ fn capture_screen(conn: &Connection) -> Result<Screenshot, String> {
 
     // Wait for buffer format info
     while !state.done.load(Ordering::SeqCst) {
-        event_queue.blocking_dispatch(&mut state)
+        event_queue
+            .blocking_dispatch(&mut state)
             .map_err(|e| format!("Dispatch error: {}", e))?;
     }
 
@@ -253,7 +276,8 @@ fn capture_screen(conn: &Connection) -> Result<Screenshot, String> {
     let fd = create_shm_fd().map_err(|e| format!("Failed to create shm fd: {}", e))?;
     let file = File::from(fd);
     let size = (format.stride * format.height) as u64;
-    file.set_len(size).map_err(|e| format!("Failed to set file size: {}", e))?;
+    file.set_len(size)
+        .map_err(|e| format!("Failed to set file size: {}", e))?;
 
     let shm_pool = shm.create_pool(file.as_fd(), size as i32, &qh, ());
     let buffer = shm_pool.create_buffer(
@@ -271,7 +295,8 @@ fn capture_screen(conn: &Connection) -> Result<Screenshot, String> {
 
     // Wait for ready or failed
     while !state.ready.load(Ordering::SeqCst) && !state.failed.load(Ordering::SeqCst) {
-        event_queue.blocking_dispatch(&mut state)
+        event_queue
+            .blocking_dispatch(&mut state)
             .map_err(|e| format!("Dispatch error: {}", e))?;
     }
 
@@ -280,8 +305,7 @@ fn capture_screen(conn: &Connection) -> Result<Screenshot, String> {
     }
 
     // Memory map and copy data
-    let mmap = unsafe { MmapMut::map_mut(&file) }
-        .map_err(|e| format!("Failed to mmap: {}", e))?;
+    let mmap = unsafe { MmapMut::map_mut(&file) }.map_err(|e| format!("Failed to mmap: {}", e))?;
 
     let data = mmap.to_vec();
 
@@ -447,6 +471,8 @@ struct PixelSnap {
 
     // Input state
     pointer_pos: Point,
+    cursor_shape_manager: Option<CursorShapeManager>,
+    cursor_shape_device: Option<WpCursorShapeDeviceV1>,
 
     // Font for rendering
     font: Option<Arc<fontdue::Font>>,
@@ -460,7 +486,7 @@ struct PixelSnap {
 }
 
 impl PixelSnap {
-    fn new(
+    pub(crate) fn new(
         registry_state: RegistryState,
         seat_state: SeatState,
         output_state: OutputState,
@@ -468,10 +494,12 @@ impl PixelSnap {
         shm: Shm,
         layer_shell: LayerShell,
         screenshot: Screenshot,
+        cursor_shape_manager: Option<CursorShapeManager>,
     ) -> Self {
         // Load a simple font for text rendering
         let font_data = include_bytes!("/usr/share/fonts/noto/NotoSans-Regular.ttf");
-        let font = fontdue::Font::from_bytes(font_data as &[u8], fontdue::FontSettings::default()).ok();
+        let font =
+            fontdue::Font::from_bytes(font_data as &[u8], fontdue::FontSettings::default()).ok();
 
         Self {
             registry_state,
@@ -487,6 +515,8 @@ impl PixelSnap {
             layer_surface: None,
             pool: None,
             pointer_pos: Point { x: 0.0, y: 0.0 },
+            cursor_shape_manager,
+            cursor_shape_device: None,
             font: font.map(Arc::new),
             needs_redraw: true,
             cached_pixmap: None,
@@ -546,7 +576,9 @@ impl PixelSnap {
         // Draw overlay (measurements, crosshair) on transparent pixmap
         if cursor_phys_x < screenshot.width && cursor_phys_y < screenshot.height {
             // Create or reuse overlay pixmap
-            let needs_new_pixmap = self.cached_pixmap.as_ref()
+            let needs_new_pixmap = self
+                .cached_pixmap
+                .as_ref()
                 .map(|p| p.width() != phys_width || p.height() != phys_height)
                 .unwrap_or(true);
 
@@ -558,7 +590,13 @@ impl PixelSnap {
             pixmap.fill(tiny_skia::Color::TRANSPARENT);
 
             let edges = find_edges(screenshot, cursor_phys_x, cursor_phys_y);
-            Self::draw_measurements_static(pixmap, &edges, cursor_phys_x, cursor_phys_y, font.as_ref());
+            Self::draw_measurements_static(
+                pixmap,
+                &edges,
+                cursor_phys_x,
+                cursor_phys_y,
+                font.as_ref(),
+            );
             Self::draw_crosshair_static(pixmap, cursor_phys_x as f32, cursor_phys_y as f32);
 
             // Composite overlay onto canvas (only non-transparent pixels)
@@ -596,7 +634,13 @@ impl PixelSnap {
         surface.commit();
     }
 
-    fn draw_measurements_static(pixmap: &mut Pixmap, edges: &Edges, cursor_x: u32, cursor_y: u32, font: Option<&Arc<fontdue::Font>>) {
+    fn draw_measurements_static(
+        pixmap: &mut Pixmap,
+        edges: &Edges,
+        cursor_x: u32,
+        cursor_y: u32,
+        font: Option<&Arc<fontdue::Font>>,
+    ) {
         let mut paint = Paint::default();
         paint.set_color(line_color());
         paint.anti_alias = true;
@@ -654,7 +698,14 @@ impl PixelSnap {
         );
     }
 
-    fn draw_end_cap_static(pixmap: &mut Pixmap, paint: &Paint, stroke: &Stroke, x: f32, y: f32, vertical: bool) {
+    fn draw_end_cap_static(
+        pixmap: &mut Pixmap,
+        paint: &Paint,
+        stroke: &Stroke,
+        x: f32,
+        y: f32,
+        vertical: bool,
+    ) {
         let cap_size = END_CAP_SIZE * 2.0; // Slightly larger for HiDPI
         let mut pb = PathBuilder::new();
         if vertical {
@@ -698,7 +749,13 @@ impl PixelSnap {
         }
     }
 
-    fn draw_label_impl(pixmap: &mut Pixmap, text: &str, x: f32, y: f32, font: Option<&Arc<fontdue::Font>>) {
+    fn draw_label_impl(
+        pixmap: &mut Pixmap,
+        text: &str,
+        x: f32,
+        y: f32,
+        font: Option<&Arc<fontdue::Font>>,
+    ) {
         let font_size = 24.0; // Fixed for HiDPI
         let padding_x = 12.0;
         let padding_y = 6.0;
@@ -721,17 +778,38 @@ impl PixelSnap {
         let mut pb = PathBuilder::new();
         pb.move_to(label_x + radius, label_y);
         pb.line_to(label_x + label_width - radius, label_y);
-        pb.quad_to(label_x + label_width, label_y, label_x + label_width, label_y + radius);
+        pb.quad_to(
+            label_x + label_width,
+            label_y,
+            label_x + label_width,
+            label_y + radius,
+        );
         pb.line_to(label_x + label_width, label_y + label_height - radius);
-        pb.quad_to(label_x + label_width, label_y + label_height, label_x + label_width - radius, label_y + label_height);
+        pb.quad_to(
+            label_x + label_width,
+            label_y + label_height,
+            label_x + label_width - radius,
+            label_y + label_height,
+        );
         pb.line_to(label_x + radius, label_y + label_height);
-        pb.quad_to(label_x, label_y + label_height, label_x, label_y + label_height - radius);
+        pb.quad_to(
+            label_x,
+            label_y + label_height,
+            label_x,
+            label_y + label_height - radius,
+        );
         pb.line_to(label_x, label_y + radius);
         pb.quad_to(label_x, label_y, label_x + radius, label_y);
         pb.close();
 
         if let Some(path) = pb.finish() {
-            pixmap.fill_path(&path, &bg_paint, FillRule::Winding, Transform::identity(), None);
+            pixmap.fill_path(
+                &path,
+                &bg_paint,
+                FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
         }
 
         // Draw text
@@ -753,10 +831,15 @@ impl PixelSnap {
                             let alpha = bitmap[py * metrics.width + px];
                             if alpha > 0 {
                                 let draw_x = cursor_x as i32 + px as i32 + metrics.xmin;
-                                let draw_y = baseline_y as i32 + py as i32 - metrics.height as i32 - metrics.ymin;
+                                let draw_y = baseline_y as i32 + py as i32
+                                    - metrics.height as i32
+                                    - metrics.ymin;
 
-                                if draw_x >= 0 && draw_x < pixmap_width
-                                   && draw_y >= 0 && draw_y < pixmap_height {
+                                if draw_x >= 0
+                                    && draw_x < pixmap_width
+                                    && draw_y >= 0
+                                    && draw_y < pixmap_height
+                                {
                                     let idx = draw_y as usize * width + draw_x as usize;
                                     if idx < pixels.len() {
                                         let pixel = &pixels[idx];
@@ -775,7 +858,9 @@ impl PixelSnap {
                                         let g = g.min(new_a);
                                         let b = b.min(new_a);
 
-                                        if let Some(new_pixel) = PremultipliedColorU8::from_rgba(r, g, b, new_a) {
+                                        if let Some(new_pixel) =
+                                            PremultipliedColorU8::from_rgba(r, g, b, new_a)
+                                        {
                                             pixels[idx] = new_pixel;
                                         }
                                     }
@@ -899,8 +984,7 @@ impl LayerShellHandler for PixelSnap {
         let pool_size = (phys_width * phys_height * 4) as usize;
 
         if self.pool.is_none() {
-            let pool = SlotPool::new(pool_size, &self.shm)
-                .expect("Failed to create pool");
+            let pool = SlotPool::new(pool_size, &self.shm).expect("Failed to create pool");
             self.pool = Some(pool);
         }
 
@@ -923,9 +1007,13 @@ impl SeatHandler for PixelSnap {
         seat: wl_seat::WlSeat,
         capability: Capability,
     ) {
-        if capability == Capability::Keyboard && self.seat_state.get_keyboard(qh, &seat, None).is_err() {
-        }
-        if capability == Capability::Pointer && self.seat_state.get_pointer(qh, &seat).is_err() {
+        if capability == Capability::Pointer {
+            if let Ok(pointer) = self.seat_state.get_pointer(qh, &seat) {
+                // Create cursor shape device if manager is available
+                if let Some(ref manager) = self.cursor_shape_manager {
+                    self.cursor_shape_device = Some(manager.get_shape_device(&pointer, qh));
+                }
+            }
         }
     }
 
@@ -938,7 +1026,8 @@ impl SeatHandler for PixelSnap {
     ) {
     }
 
-    fn remove_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: wl_seat::WlSeat) {}
+    fn remove_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: wl_seat::WlSeat) {
+    }
 }
 
 impl KeyboardHandler for PixelSnap {
@@ -1009,6 +1098,12 @@ impl PointerHandler for PixelSnap {
     ) {
         for event in events {
             match event.kind {
+                PointerEventKind::Enter { serial } => {
+                    // Set crosshair cursor on enter
+                    if let Some(ref device) = self.cursor_shape_device {
+                        device.set_shape(serial, wp_cursor_shape_device_v1::Shape::Crosshair);
+                    }
+                }
                 PointerEventKind::Motion { .. } => {
                     self.pointer_pos = Point {
                         x: event.position.0,
@@ -1079,6 +1174,9 @@ fn main() {
     let output_state = OutputState::new(&globals, &qh);
     let registry_state = RegistryState::new(&globals);
 
+    // Try to get cursor shape manager (optional, may not be available on all compositors)
+    let cursor_shape_manager = CursorShapeManager::bind(&globals, &qh).ok();
+
     let mut pixelsnap = PixelSnap::new(
         registry_state,
         seat_state,
@@ -1087,6 +1185,7 @@ fn main() {
         shm,
         layer_shell,
         screenshot,
+        cursor_shape_manager,
     );
 
     // Create layer surface
