@@ -692,8 +692,8 @@ impl PixelSnap {
         Self::draw_label_impl(
             pixmap,
             &format!("{} x {}", h_distance, v_distance),
-            cursor_x + 30.0,
-            cursor_y + 30.0,
+            cursor_x + 120.0,
+            cursor_y + 50.0,
             font,
         );
     }
