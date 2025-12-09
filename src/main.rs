@@ -149,8 +149,8 @@ impl PixelSnap {
 
         let pixmap = self.cached_pixmap.as_mut().unwrap();
 
-        // Clear with very slightly tinted background
-        pixmap.fill(Color::from_rgba8(0, 0, 0, 15));
+        // Clear with subtle red tinted background
+        pixmap.fill(Color::from_rgba8(255, 0, 0, 12));
 
         // Draw measurement if we have one (scale coordinates for HiDPI)
         if let Some(measure) = &self.measure {

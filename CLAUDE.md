@@ -8,6 +8,7 @@ A minimal screen measurement tool for Hyprland/Wayland, inspired by PixelSnap 2 
 - Captures mouse input for click-and-drag measurement
 - Constrains movement to horizontal OR vertical (auto-detected based on drag direction)
 - Renders with tiny-skia (software rendering) to a shared memory buffer
+- Supports HiDPI displays by rendering at physical pixel resolution and using `set_buffer_scale`
 
 ## Usage
 
