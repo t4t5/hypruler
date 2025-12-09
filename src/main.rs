@@ -67,8 +67,9 @@ struct PixelSnap {
     layer_shell: LayerShell,
 
     exit: bool,
-    width: u32,
-    height: u32,
+    width: u32,  // Logical width
+    height: u32, // Logical height
+    scale: i32,  // HiDPI scale factor
     layer_surface: Option<LayerSurface>,
     pool: Option<SlotPool>,
 
@@ -108,6 +109,7 @@ impl PixelSnap {
             exit: false,
             width: 0,
             height: 0,
+            scale: 1,
             layer_surface: None,
             pool: None,
             pointer_pos: Point { x: 0.0, y: 0.0 },
@@ -131,28 +133,39 @@ impl PixelSnap {
         }
         self.needs_redraw = false;
 
-        // Create or reuse pixmap
-        let pixmap = self.cached_pixmap.get_or_insert_with(|| {
-            Pixmap::new(self.width, self.height).unwrap()
-        });
+        // Physical pixel dimensions (for HiDPI)
+        let phys_width = self.width * self.scale as u32;
+        let phys_height = self.height * self.scale as u32;
+        let scale = self.scale as f32;
+
+        // Create or reuse pixmap at physical resolution
+        let needs_new_pixmap = self.cached_pixmap.as_ref()
+            .map(|p| p.width() != phys_width || p.height() != phys_height)
+            .unwrap_or(true);
+
+        if needs_new_pixmap {
+            self.cached_pixmap = Pixmap::new(phys_width, phys_height);
+        }
+
+        let pixmap = self.cached_pixmap.as_mut().unwrap();
 
         // Clear with very slightly tinted background
         pixmap.fill(Color::from_rgba8(0, 0, 0, 15));
 
-        // Draw measurement if we have one
+        // Draw measurement if we have one (scale coordinates for HiDPI)
         if let Some(measure) = &self.measure {
-            Self::draw_measurement_static(pixmap, measure, self.font.as_ref());
+            Self::draw_measurement_static(pixmap, measure, self.font.as_ref(), scale);
         }
 
         // Now get the pool and buffer
         let pool = self.pool.as_mut().unwrap();
-        let stride = self.width as i32 * 4;
-        let size = (stride * self.height as i32) as usize;
+        let stride = phys_width as i32 * 4;
+        let size = (stride * phys_height as i32) as usize;
 
         let (buffer, canvas) = pool
             .create_buffer(
-                self.width as i32,
-                self.height as i32,
+                phys_width as i32,
+                phys_height as i32,
                 stride,
                 wl_shm::Format::Argb8888,
             )
@@ -171,8 +184,12 @@ impl PixelSnap {
 
         let layer_surface = self.layer_surface.as_ref().unwrap();
         let surface = layer_surface.wl_surface();
+
+        // Tell compositor about the buffer scale
+        surface.set_buffer_scale(self.scale);
+
         buffer.attach_to(surface).expect("Failed to attach buffer");
-        surface.damage_buffer(0, 0, self.width as i32, self.height as i32);
+        surface.damage_buffer(0, 0, phys_width as i32, phys_height as i32);
         surface.commit();
     }
 
@@ -180,18 +197,19 @@ impl PixelSnap {
         self.needs_redraw = true;
     }
 
-    fn draw_measurement_static(pixmap: &mut Pixmap, measure: &MeasureState, font: Option<&Arc<fontdue::Font>>) {
+    fn draw_measurement_static(pixmap: &mut Pixmap, measure: &MeasureState, font: Option<&Arc<fontdue::Font>>, scale: f32) {
         let mut paint = Paint::default();
         paint.set_color(line_color());
         paint.anti_alias = true;
 
         let stroke = Stroke {
-            width: LINE_WIDTH,
+            width: LINE_WIDTH * scale,
             ..Default::default()
         };
 
-        let (x1, y1) = (measure.start.x as f32, measure.start.y as f32);
-        let (x2, y2) = (measure.end.x as f32, measure.end.y as f32);
+        // Scale logical coordinates to physical pixels
+        let (x1, y1) = (measure.start.x as f32 * scale, measure.start.y as f32 * scale);
+        let (x2, y2) = (measure.end.x as f32 * scale, measure.end.y as f32 * scale);
 
         // Draw main line
         let mut pb = PathBuilder::new();
@@ -204,46 +222,47 @@ impl PixelSnap {
         // Draw end caps
         match measure.direction {
             MeasureDirection::Horizontal => {
-                Self::draw_end_cap(pixmap, &paint, &stroke, x1, y1, true);
-                Self::draw_end_cap(pixmap, &paint, &stroke, x2, y2, true);
+                Self::draw_end_cap(pixmap, &paint, &stroke, x1, y1, true, scale);
+                Self::draw_end_cap(pixmap, &paint, &stroke, x2, y2, true, scale);
             }
             MeasureDirection::Vertical => {
-                Self::draw_end_cap(pixmap, &paint, &stroke, x1, y1, false);
-                Self::draw_end_cap(pixmap, &paint, &stroke, x2, y2, false);
+                Self::draw_end_cap(pixmap, &paint, &stroke, x1, y1, false, scale);
+                Self::draw_end_cap(pixmap, &paint, &stroke, x2, y2, false, scale);
             }
         }
 
-        // Calculate and draw label
+        // Calculate distance in LOGICAL pixels (what user cares about)
         let distance = match measure.direction {
-            MeasureDirection::Horizontal => (x2 - x1).abs(),
-            MeasureDirection::Vertical => (y2 - y1).abs(),
+            MeasureDirection::Horizontal => (measure.end.x - measure.start.x).abs(),
+            MeasureDirection::Vertical => (measure.end.y - measure.start.y).abs(),
         };
 
         let label = format!("{}", distance.round() as i32);
         let mid_x = (x1 + x2) / 2.0;
         let mid_y = (y1 + y2) / 2.0;
 
-        Self::draw_label(pixmap, &label, mid_x, mid_y, measure.direction, font);
+        Self::draw_label(pixmap, &label, mid_x, mid_y, measure.direction, font, scale);
     }
 
-    fn draw_end_cap(pixmap: &mut Pixmap, paint: &Paint, stroke: &Stroke, x: f32, y: f32, vertical: bool) {
+    fn draw_end_cap(pixmap: &mut Pixmap, paint: &Paint, stroke: &Stroke, x: f32, y: f32, vertical: bool, scale: f32) {
+        let cap_size = END_CAP_SIZE * scale;
         let mut pb = PathBuilder::new();
         if vertical {
-            pb.move_to(x, y - END_CAP_SIZE / 2.0);
-            pb.line_to(x, y + END_CAP_SIZE / 2.0);
+            pb.move_to(x, y - cap_size / 2.0);
+            pb.line_to(x, y + cap_size / 2.0);
         } else {
-            pb.move_to(x - END_CAP_SIZE / 2.0, y);
-            pb.line_to(x + END_CAP_SIZE / 2.0, y);
+            pb.move_to(x - cap_size / 2.0, y);
+            pb.line_to(x + cap_size / 2.0, y);
         }
         if let Some(path) = pb.finish() {
             pixmap.stroke_path(&path, paint, stroke, Transform::identity(), None);
         }
     }
 
-    fn draw_label(pixmap: &mut Pixmap, text: &str, x: f32, y: f32, direction: MeasureDirection, font: Option<&Arc<fontdue::Font>>) {
-        let font_size = 14.0;
-        let padding_x = 8.0;
-        let padding_y = 4.0;
+    fn draw_label(pixmap: &mut Pixmap, text: &str, x: f32, y: f32, direction: MeasureDirection, font: Option<&Arc<fontdue::Font>>, scale: f32) {
+        let font_size = 14.0 * scale;
+        let padding_x = 8.0 * scale;
+        let padding_y = 4.0 * scale;
 
         // Calculate text dimensions
         let text_width = text.len() as f32 * font_size * 0.6;
@@ -253,7 +272,7 @@ impl PixelSnap {
         let label_height = text_height + padding_y * 2.0;
 
         // Position label offset from the line
-        let offset = 12.0;
+        let offset = 12.0 * scale;
         let (label_x, label_y) = match direction {
             MeasureDirection::Horizontal => (x - label_width / 2.0, y - label_height - offset),
             MeasureDirection::Vertical => (x + offset, y - label_height / 2.0),
@@ -267,7 +286,7 @@ impl PixelSnap {
             bg_paint.anti_alias = true;
 
             // Draw rounded rect using path
-            let radius = 4.0;
+            let radius = 4.0 * scale;
             let mut pb = PathBuilder::new();
             pb.move_to(label_x + radius, label_y);
             pb.line_to(label_x + label_width - radius, label_y);
@@ -372,8 +391,14 @@ impl CompositorHandler for PixelSnap {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
         _surface: &wl_surface::WlSurface,
-        _new_factor: i32,
+        new_factor: i32,
     ) {
+        if self.scale != new_factor {
+            self.scale = new_factor;
+            // Invalidate cached pixmap since dimensions changed
+            self.cached_pixmap = None;
+            self.request_redraw();
+        }
     }
 
     fn transform_changed(
@@ -460,15 +485,18 @@ impl LayerShellHandler for PixelSnap {
         self.width = configure.new_size.0;
         self.height = configure.new_size.1;
 
+        // Calculate physical size for the buffer pool (account for HiDPI)
+        let phys_width = self.width * self.scale as u32;
+        let phys_height = self.height * self.scale as u32;
+        let pool_size = (phys_width * phys_height * 4) as usize;
+
         if self.pool.is_none() {
-            let pool = SlotPool::new(
-                (self.width * self.height * 4) as usize,
-                &self.shm,
-            )
-            .expect("Failed to create pool");
+            let pool = SlotPool::new(pool_size, &self.shm)
+                .expect("Failed to create pool");
             self.pool = Some(pool);
         }
 
+        self.request_redraw();
         self.draw(qh);
     }
 }
