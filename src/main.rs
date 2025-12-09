@@ -641,29 +641,15 @@ impl PixelSnap {
         Self::draw_end_cap_static(pixmap, &paint, &stroke, cursor_x, down, false);
 
         // Calculate distances in physical pixels (edge-to-edge)
-        // For display, we show physical pixels since that's what the screenshot is
         let h_distance = edges.right.saturating_sub(edges.left);
         let v_distance = edges.down.saturating_sub(edges.up);
 
-        // Draw labels
-        let h_mid_x = (left + right) / 2.0;
-        let v_mid_y = (up + down) / 2.0;
-
-        // Horizontal distance label (above the line)
+        // Draw combined label near cursor (offset to bottom-right)
         Self::draw_label_impl(
             pixmap,
-            &format!("{}", h_distance),
-            h_mid_x,
-            cursor_y - 30.0,
-            font,
-        );
-
-        // Vertical distance label (to the right of the line)
-        Self::draw_label_impl(
-            pixmap,
-            &format!("{}", v_distance),
+            &format!("{} x {}", h_distance, v_distance),
             cursor_x + 30.0,
-            v_mid_y,
+            cursor_y + 30.0,
             font,
         );
     }
