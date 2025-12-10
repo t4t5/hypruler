@@ -20,6 +20,7 @@ release version:
     echo "Version is already $current, no update needed"
   else
     sed -i 's/^version = ".*"/version = "{{version}}"/' Cargo.toml
+    cargo check
     echo "Updated version: $current → {{version}}"
   fi
 
