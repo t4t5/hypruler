@@ -6,3 +6,6 @@ build:
 
 start:
   ./target/release/pixelsnap
+
+install:
+  cargo install --path .

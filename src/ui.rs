@@ -32,7 +32,7 @@ fn line_color() -> Color {
 }
 
 fn fill_color() -> Color {
-    Color::from_rgba8(231, 76, 60, 30)
+    Color::from_rgba8(231, 76, 60, 60)
 }
 
 fn label_bg_color() -> Color {
@@ -288,7 +288,7 @@ fn draw_text(pixmap: &mut Pixmap, font: &fontdue::Font, text: &str, start_x: f32
 }
 
 fn draw_label(pixmap: &mut Pixmap, text: &str, x: f32, y: f32, font: Option<&fontdue::Font>) {
-    let text_width = text.len() as f32 * FONT_SIZE * 0.6;
+    let text_width = text.len() as f32 * FONT_SIZE * 0.5;
     let label_width = text_width + LABEL_PADDING.0 * 2.0;
     let label_height = FONT_SIZE + LABEL_PADDING.1 * 2.0;
     let label_x = x - label_width / 2.0;
