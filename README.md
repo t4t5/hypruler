@@ -1,7 +1,7 @@
 <h1 align="center">hypruler</h1>
 
 <p align="center">
-  📏 Measure anything on your screen. Built for Linux.
+  📏 Measure anything on your screen. Built for Linux + Hyprland.
 </p>
 
 <p align="center">
@@ -12,9 +12,25 @@
 
 ## Installation
 
-Build from source:
+### Pre-built AUR binary (fastest)
 
 ```bash
+yay -S hypruler-bin
+```
+
+### Building from source
+
+Using the AUR:
+
+```bash
+yay -S hypruler
+```
+
+Or manually from GitHub:
+
+```bash
+git clone https://github.com/t4t5/hypruler.git
+cd hypruler
 cargo build --release
 cargo install --path .
 ```
@@ -37,6 +53,10 @@ bindd = SUPER, M, hypruler, exec, hypruler
 
 - wlroots-based compositor (Hyprland, Sway, etc.)
 - `wlr-screencopy-unstable-v1` protocol support
+
+## Acknowledgments
+
+Heavily inspired by [PixelSnap](https://pixelsnap.com/) for macOS.
 
 ## License
 
