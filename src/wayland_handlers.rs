@@ -1,6 +1,8 @@
 use crate::capture::Screenshot;
 use crate::edge_detection::find_edges;
 use crate::ui::{draw_crosshair, draw_measurements};
+use std::process::Command;
+
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_pointer,
@@ -10,7 +12,9 @@ use smithay_client_toolkit::{
     registry_handlers,
     seat::{
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
-        pointer::{cursor_shape::CursorShapeManager, PointerEvent, PointerEventKind, PointerHandler},
+        pointer::{
+            cursor_shape::CursorShapeManager, PointerEvent, PointerEventKind, PointerHandler,
+        },
         Capability, SeatHandler, SeatState,
     },
     shell::{
@@ -31,6 +35,15 @@ use wayland_client::{
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{
     self, WpCursorShapeDeviceV1,
 };
+
+fn find_system_font() -> Option<Vec<u8>> {
+    let output = Command::new("fc-match")
+        .args(["-f", "%{file}", "sans-serif"])
+        .output()
+        .ok()?;
+    let path = String::from_utf8(output.stdout).ok()?;
+    std::fs::read(path.trim()).ok()
+}
 
 pub struct WaylandApp {
     // Wayland protocol state
@@ -66,8 +79,7 @@ pub struct WaylandApp {
 
 impl WaylandApp {
     pub fn new(conn: &Connection, screenshot: Screenshot) -> (Self, EventQueue<Self>) {
-        let (globals, event_queue) =
-            registry_queue_init(conn).expect("Failed to init registry");
+        let (globals, event_queue) = registry_queue_init(conn).expect("Failed to init registry");
         let qh = event_queue.handle();
 
         let compositor_state =
@@ -79,9 +91,9 @@ impl WaylandApp {
         let registry_state = RegistryState::new(&globals);
         let cursor_shape_manager = CursorShapeManager::bind(&globals, &qh).ok();
 
-        let font_data = include_bytes!("/usr/share/fonts/noto/NotoSans-Regular.ttf");
-        let font =
-            fontdue::Font::from_bytes(font_data as &[u8], fontdue::FontSettings::default()).ok();
+        let font = find_system_font().and_then(|data| {
+            fontdue::Font::from_bytes(data, fontdue::FontSettings::default()).ok()
+        });
 
         let app = Self {
             registry_state,
