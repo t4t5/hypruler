@@ -1,6 +1,6 @@
 [package]
 name = "hypruler"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Measure anything on your screen. Built for Linux."
 license = "MIT"
