@@ -1,0 +1,1 @@
+Check if CLAUDE.md is still accurate after recent changes. Review the current codebase structure and compare it against what's documented. If anything is outdated (file structure, architecture, how things work), update CLAUDE.md to reflect the current state.
