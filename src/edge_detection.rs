@@ -1,6 +1,6 @@
 use crate::capture::Screenshot;
 
-const EDGE_THRESHOLD: i32 = 5;
+const EDGE_THRESHOLD: i32 = 1;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Edges {
@@ -67,7 +67,7 @@ fn scan_vertical(screenshot: &Screenshot, x: u32, start_y: u32, direction: i32) 
 const SNAP_DISTANCE: u32 = 200;
 
 /// Luminance difference threshold for snapping (higher = less sensitive)
-const SNAP_THRESHOLD: i32 = 30;
+const SNAP_THRESHOLD: i32 = 10;
 
 /// Snap a vertical edge (left or right) to nearby content.
 /// Scans inward from every pixel along the edge and returns the outermost hit.
