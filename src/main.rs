@@ -1,8 +1,10 @@
 mod capture;
-mod render;
+mod edge_detection;
+mod ui;
 
 use capture::{capture_screen, Screenshot};
-use render::{draw_crosshair, draw_measurements, find_edges};
+use edge_detection::find_edges;
+use ui::{draw_crosshair, draw_measurements};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_pointer,

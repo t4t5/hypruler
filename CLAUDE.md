@@ -14,9 +14,10 @@ A screen measurement tool for Hyprland/Sway (wlroots-based compositors), inspire
 
 ```
 src/
-  main.rs      - App state, Wayland handlers, entry point
-  capture.rs   - Screen capture via wlr-screencopy protocol
-  render.rs    - Edge detection + drawing with tiny-skia
+  main.rs           - App state, Wayland handlers, entry point
+  capture.rs        - Screen capture via wlr-screencopy protocol
+  edge_detection.rs - Edge detection (luminance-based boundary finding)
+  ui.rs             - Drawing with tiny-skia (lines, crosshair, labels)
 ```
 
 - **Screen capture** at physical resolution (e.g., 2880x1920 for HiDPI)
