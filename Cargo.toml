@@ -2,6 +2,9 @@
 name = "hypruler"
 version = "0.1.0"
 edition = "2024"
+description = "Measure anything on your screen. Built for Linux."
+license = "MIT"
+repository = "https://github.com/t4t5/hypruler"
 
 [dependencies]
 smithay-client-toolkit = "0.19"

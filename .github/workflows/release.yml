@@ -1,0 +1,34 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish_aur:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Generate PKGBUILD
+        run: |
+          CHECKSUM=$(curl -sL "https://github.com/t4t5/hypruler/archive/v${{ steps.version.outputs.version }}.tar.gz" | sha256sum | cut -d' ' -f1)
+          sed -e "s/VERSION_PLACEHOLDER/${{ steps.version.outputs.version }}/" \
+              -e "s/CHECKSUM_PLACEHOLDER/$CHECKSUM/" \
+              aur/PKGBUILD.template > PKGBUILD
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v3
+        with:
+          pkgname: hypruler
+          pkgbuild: ./PKGBUILD
+          commit_username: ${{ vars.AUR_USERNAME }}
+          commit_email: ${{ vars.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update to v${{ steps.version.outputs.version }}"
+          updpkgsums: false
