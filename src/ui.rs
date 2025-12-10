@@ -10,6 +10,22 @@ const FONT_SIZE: f32 = 24.0;
 const LABEL_PADDING: (f32, f32) = (12.0, 6.0);
 const LABEL_RADIUS: f32 = 6.0;
 const LABEL_OFFSET: (f32, f32) = (120.0, 50.0);
+const EDGE_THRESHOLD_X: f32 = 200.0;
+const EDGE_THRESHOLD_Y: f32 = 100.0;
+
+fn get_label_position(cx: f32, cy: f32, screen_w: u32, screen_h: u32) -> (f32, f32) {
+    let x = if cx > screen_w as f32 - EDGE_THRESHOLD_X {
+        cx - LABEL_OFFSET.0
+    } else {
+        cx + LABEL_OFFSET.0
+    };
+    let y = if cy > screen_h as f32 - EDGE_THRESHOLD_Y {
+        cy - LABEL_OFFSET.1
+    } else {
+        cy + LABEL_OFFSET.1
+    };
+    (x, y)
+}
 
 fn line_color() -> Color {
     Color::from_rgba8(231, 76, 60, 255)
@@ -76,11 +92,12 @@ pub fn draw_measurements(
     // Dimension label
     let h_distance = edges.right.saturating_sub(edges.left);
     let v_distance = edges.down.saturating_sub(edges.up);
+    let (lx, ly) = get_label_position(cx, cy, pixmap.width(), pixmap.height());
     draw_label(
         pixmap,
         &format!("{} x {}", h_distance, v_distance),
-        cx + LABEL_OFFSET.0,
-        cy + LABEL_OFFSET.1,
+        lx,
+        ly,
         font,
     );
 }
@@ -110,7 +127,13 @@ pub fn draw_rectangle_measurement(
     pb.line_to(left, bottom);
     pb.close();
     if let Some(path) = pb.finish() {
-        pixmap.fill_path(&path, &fill_paint, FillRule::Winding, Transform::identity(), None);
+        pixmap.fill_path(
+            &path,
+            &fill_paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
     }
 
     // Draw outline
