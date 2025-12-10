@@ -9,7 +9,9 @@ const CROSSHAIR_SIZE: f32 = 15.0;
 const FONT_SIZE: f32 = 24.0;
 const LABEL_PADDING: (f32, f32) = (12.0, 6.0);
 const LABEL_RADIUS: f32 = 6.0;
-const LABEL_OFFSET: (f32, f32) = (120.0, 50.0);
+const LABEL_OFFSET: (f32, f32) = (95.0, 40.0);
+
+// How close to screen edges before flipping label position:
 const EDGE_THRESHOLD_X: f32 = 200.0;
 const EDGE_THRESHOLD_Y: f32 = 100.0;
 
@@ -108,6 +110,8 @@ pub fn draw_rectangle_measurement(
     y1: u32,
     x2: u32,
     y2: u32,
+    cursor_x: u32,
+    cursor_y: u32,
     font: Option<&fontdue::Font>,
 ) {
     let left = x1 as f32;
@@ -155,18 +159,22 @@ pub fn draw_rectangle_measurement(
     // Right edge
     stroke_line(pixmap, &stroke_paint, &stroke, right, top, right, bottom);
 
-    // Draw dimension label centered on rectangle
+    // Draw dimension label
     let width = x2.saturating_sub(x1);
     let height = y2.saturating_sub(y1);
-    let center_x = (left + right) / 2.0;
-    let center_y = (top + bottom) / 2.0;
-    draw_label(
-        pixmap,
-        &format!("{} x {}", width, height),
-        center_x,
-        center_y,
-        font,
-    );
+    let (lx, ly) = if width >= 150 && height >= 50 {
+        // Center on rectangle if large enough
+        ((left + right) / 2.0, (top + bottom) / 2.0)
+    } else {
+        // Position relative to cursor for small rectangles
+        get_label_position(
+            cursor_x as f32,
+            cursor_y as f32,
+            pixmap.width(),
+            pixmap.height(),
+        )
+    };
+    draw_label(pixmap, &format!("{} x {}", width, height), lx, ly, font);
 }
 
 fn draw_end_cap(

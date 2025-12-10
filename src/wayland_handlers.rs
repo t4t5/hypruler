@@ -215,13 +215,24 @@ impl WaylandApp {
                     y1.min(y2),
                     x1.max(x2),
                     y1.max(y2),
+                    cursor_phys_x,
+                    cursor_phys_y,
                     self.font.as_ref(),
                 );
             }
         } else if cursor_phys_x < self.screenshot.width && cursor_phys_y < self.screenshot.height {
             // Draw completed rectangle if exists
             if let Some((x1, y1, x2, y2)) = self.drag_rect {
-                draw_rectangle_measurement(pixmap, x1, y1, x2, y2, self.font.as_ref());
+                draw_rectangle_measurement(
+                    pixmap,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    cursor_phys_x,
+                    cursor_phys_y,
+                    self.font.as_ref(),
+                );
             }
 
             // Always show edge detection and crosshair when not dragging
