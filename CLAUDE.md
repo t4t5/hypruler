@@ -7,8 +7,10 @@ A screen measurement tool for Hyprland/Sway (wlroots-based compositors), inspire
 1. **Screen Capture**: On launch, captures a screenshot using `zwlr_screencopy_manager_v1` protocol
 2. **Edge Detection**: Pre-computes luminance values for fast edge detection (threshold-based)
 3. **Overlay**: Creates a fullscreen layer-shell surface on the `overlay` layer showing the frozen screenshot
-4. **Measurement**: As you move the cursor, automatically detects edges and draws measurement lines between them
-5. **Rendering**: Uses tiny-skia for drawing lines/labels, with pre-converted BGRA data for fast background rendering
+4. **Measurement**: Two modes:
+   - **Auto mode**: Move cursor to automatically detect edges and show measurement lines
+   - **Manual mode**: Click and drag to draw a custom measurement rectangle
+5. **Rendering**: Uses tiny-skia for drawing lines/labels/rectangles, with pre-converted BGRA data for fast background rendering
 
 ## Architecture
 
@@ -18,7 +20,7 @@ src/
   wayland_handlers.rs - WaylandApp struct, all Wayland protocol handlers, rendering
   capture.rs         - Screen capture via wlr-screencopy protocol
   edge_detection.rs  - Edge detection (luminance-based boundary finding)
-  ui.rs              - Drawing with tiny-skia (lines, crosshair, labels)
+  ui.rs              - Drawing with tiny-skia (lines, crosshair, labels, rectangles)
 ```
 
 - **Screen capture** at physical resolution (e.g., 2880x1920 for HiDPI)
@@ -34,9 +36,10 @@ src/
    ```
    bind = $mainMod, M, exec, /path/to/pixelsnap
    ```
-2. Move cursor to measure between detected edges
-3. Dimensions shown as `{width} x {height}` near cursor
-4. Press any key or click to exit
+2. Move cursor to measure between detected edges (auto mode)
+3. Click and drag to draw a custom measurement rectangle (manual mode)
+4. Dimensions shown as `{width} x {height}` near cursor or centered on rectangle
+5. Press any key to exit
 
 ## Building
 

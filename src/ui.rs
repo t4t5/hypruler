@@ -15,6 +15,10 @@ fn line_color() -> Color {
     Color::from_rgba8(231, 76, 60, 255)
 }
 
+fn fill_color() -> Color {
+    Color::from_rgba8(231, 76, 60, 30)
+}
+
 fn label_bg_color() -> Color {
     Color::from_rgba8(40, 40, 40, 230)
 }
@@ -77,6 +81,67 @@ pub fn draw_measurements(
         &format!("{} x {}", h_distance, v_distance),
         cx + LABEL_OFFSET.0,
         cy + LABEL_OFFSET.1,
+        font,
+    );
+}
+
+pub fn draw_rectangle_measurement(
+    pixmap: &mut Pixmap,
+    x1: u32,
+    y1: u32,
+    x2: u32,
+    y2: u32,
+    font: Option<&fontdue::Font>,
+) {
+    let left = x1 as f32;
+    let top = y1 as f32;
+    let right = x2 as f32;
+    let bottom = y2 as f32;
+
+    // Draw filled rectangle
+    let mut fill_paint = Paint::default();
+    fill_paint.set_color(fill_color());
+    fill_paint.anti_alias = true;
+
+    let mut pb = PathBuilder::new();
+    pb.move_to(left, top);
+    pb.line_to(right, top);
+    pb.line_to(right, bottom);
+    pb.line_to(left, bottom);
+    pb.close();
+    if let Some(path) = pb.finish() {
+        pixmap.fill_path(&path, &fill_paint, FillRule::Winding, Transform::identity(), None);
+    }
+
+    // Draw outline
+    let mut stroke_paint = Paint::default();
+    stroke_paint.set_color(line_color());
+    stroke_paint.anti_alias = true;
+
+    let stroke = Stroke {
+        width: LINE_WIDTH,
+        ..Default::default()
+    };
+
+    // Top edge
+    stroke_line(pixmap, &stroke_paint, &stroke, left, top, right, top);
+    // Bottom edge
+    stroke_line(pixmap, &stroke_paint, &stroke, left, bottom, right, bottom);
+    // Left edge
+    stroke_line(pixmap, &stroke_paint, &stroke, left, top, left, bottom);
+    // Right edge
+    stroke_line(pixmap, &stroke_paint, &stroke, right, top, right, bottom);
+
+    // Draw dimension label centered on rectangle
+    let width = x2.saturating_sub(x1);
+    let height = y2.saturating_sub(y1);
+    let center_x = (left + right) / 2.0;
+    let center_y = (top + bottom) / 2.0;
+    draw_label(
+        pixmap,
+        &format!("{} x {}", width, height),
+        center_x,
+        center_y,
         font,
     );
 }

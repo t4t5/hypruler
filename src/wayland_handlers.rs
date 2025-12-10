@@ -1,6 +1,6 @@
 use crate::capture::Screenshot;
 use crate::edge_detection::find_edges;
-use crate::ui::{draw_crosshair, draw_measurements};
+use crate::ui::{draw_crosshair, draw_measurements, draw_rectangle_measurement};
 use std::process::Command;
 
 use smithay_client_toolkit::{
@@ -73,6 +73,11 @@ pub struct WaylandApp {
     cached_pixmap: Option<Pixmap>,
     screenshot: Screenshot,
 
+    // Drag-to-measure state
+    drag_start: Option<(f64, f64)>,
+    drag_rect: Option<(u32, u32, u32, u32)>,
+    is_dragging: bool,
+
     // Control
     exit: bool,
 }
@@ -115,6 +120,9 @@ impl WaylandApp {
             needs_redraw: true,
             cached_pixmap: None,
             screenshot,
+            drag_start: None,
+            drag_rect: None,
+            is_dragging: false,
             exit: false,
         };
 
@@ -181,20 +189,42 @@ impl WaylandApp {
         canvas[..bgra_size].copy_from_slice(&self.screenshot.bgra_data[..bgra_size]);
 
         // Draw overlay
-        if cursor_phys_x < self.screenshot.width && cursor_phys_y < self.screenshot.height {
-            let needs_new_pixmap = self
-                .cached_pixmap
-                .as_ref()
-                .map(|p| p.width() != phys_width || p.height() != phys_height)
-                .unwrap_or(true);
+        let needs_new_pixmap = self
+            .cached_pixmap
+            .as_ref()
+            .map(|p| p.width() != phys_width || p.height() != phys_height)
+            .unwrap_or(true);
 
-            if needs_new_pixmap {
-                self.cached_pixmap = Pixmap::new(phys_width, phys_height);
+        if needs_new_pixmap {
+            self.cached_pixmap = Pixmap::new(phys_width, phys_height);
+        }
+
+        let pixmap = self.cached_pixmap.as_mut().unwrap();
+        pixmap.fill(tiny_skia::Color::TRANSPARENT);
+
+        if self.is_dragging {
+            // Draw rectangle from drag start to current cursor
+            if let Some((start_x, start_y)) = self.drag_start {
+                let x1 = (start_x * scale as f64) as u32;
+                let y1 = (start_y * scale as f64) as u32;
+                let x2 = cursor_phys_x;
+                let y2 = cursor_phys_y;
+                draw_rectangle_measurement(
+                    pixmap,
+                    x1.min(x2),
+                    y1.min(y2),
+                    x1.max(x2),
+                    y1.max(y2),
+                    self.font.as_ref(),
+                );
+            }
+        } else if cursor_phys_x < self.screenshot.width && cursor_phys_y < self.screenshot.height {
+            // Draw completed rectangle if exists
+            if let Some((x1, y1, x2, y2)) = self.drag_rect {
+                draw_rectangle_measurement(pixmap, x1, y1, x2, y2, self.font.as_ref());
             }
 
-            let pixmap = self.cached_pixmap.as_mut().unwrap();
-            pixmap.fill(tiny_skia::Color::TRANSPARENT);
-
+            // Always show edge detection and crosshair when not dragging
             let edges = find_edges(&self.screenshot, cursor_phys_x, cursor_phys_y);
             draw_measurements(
                 pixmap,
@@ -204,28 +234,28 @@ impl WaylandApp {
                 self.font.as_ref(),
             );
             draw_crosshair(pixmap, cursor_phys_x as f32, cursor_phys_y as f32);
+        }
 
-            // Composite overlay onto canvas
-            let overlay_data = pixmap.data();
-            for (i, chunk) in canvas[..size].chunks_exact_mut(4).enumerate() {
-                let src_idx = i * 4;
-                let alpha = overlay_data[src_idx + 3];
-                if alpha > 0 {
-                    let src_r = overlay_data[src_idx] as u32;
-                    let src_g = overlay_data[src_idx + 1] as u32;
-                    let src_b = overlay_data[src_idx + 2] as u32;
-                    let src_a = alpha as u32;
+        // Composite overlay onto canvas
+        let overlay_data = pixmap.data();
+        for (i, chunk) in canvas[..size].chunks_exact_mut(4).enumerate() {
+            let src_idx = i * 4;
+            let alpha = overlay_data[src_idx + 3];
+            if alpha > 0 {
+                let src_r = overlay_data[src_idx] as u32;
+                let src_g = overlay_data[src_idx + 1] as u32;
+                let src_b = overlay_data[src_idx + 2] as u32;
+                let src_a = alpha as u32;
 
-                    let dst_b = chunk[0] as u32;
-                    let dst_g = chunk[1] as u32;
-                    let dst_r = chunk[2] as u32;
+                let dst_b = chunk[0] as u32;
+                let dst_g = chunk[1] as u32;
+                let dst_r = chunk[2] as u32;
 
-                    let inv_a = 255 - src_a;
-                    chunk[0] = ((src_b * src_a + dst_b * inv_a) / 255) as u8;
-                    chunk[1] = ((src_g * src_a + dst_g * inv_a) / 255) as u8;
-                    chunk[2] = ((src_r * src_a + dst_r * inv_a) / 255) as u8;
-                    chunk[3] = 255;
-                }
+                let inv_a = 255 - src_a;
+                chunk[0] = ((src_b * src_a + dst_b * inv_a) / 255) as u8;
+                chunk[1] = ((src_g * src_a + dst_g * inv_a) / 255) as u8;
+                chunk[2] = ((src_r * src_a + dst_r * inv_a) / 255) as u8;
+                chunk[3] = 255;
             }
         }
 
@@ -439,7 +469,26 @@ impl PointerHandler for WaylandApp {
                     self.draw(qh);
                 }
                 PointerEventKind::Press { button: 272, .. } => {
-                    self.exit = true;
+                    // Start drag
+                    self.drag_start = Some((self.pointer_x, self.pointer_y));
+                    self.is_dragging = true;
+                    self.drag_rect = None;
+                    self.needs_redraw = true;
+                    self.draw(qh);
+                }
+                PointerEventKind::Release { button: 272, .. } => {
+                    // End drag - finalize rectangle
+                    if let Some((start_x, start_y)) = self.drag_start {
+                        let scale = self.scale as f64;
+                        let x1 = (start_x * scale) as u32;
+                        let y1 = (start_y * scale) as u32;
+                        let x2 = (self.pointer_x * scale) as u32;
+                        let y2 = (self.pointer_y * scale) as u32;
+                        self.drag_rect = Some((x1.min(x2), y1.min(y2), x1.max(x2), y1.max(y2)));
+                    }
+                    self.is_dragging = false;
+                    self.needs_redraw = true;
+                    self.draw(qh);
                 }
                 _ => {}
             }
