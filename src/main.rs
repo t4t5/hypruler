@@ -37,6 +37,7 @@ use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::
 };
 
 struct PixelSnap {
+    // Wayland protocol state (required by smithay-client-toolkit)
     registry_state: RegistryState,
     seat_state: SeatState,
     output_state: OutputState,
@@ -44,25 +45,31 @@ struct PixelSnap {
     shm: Shm,
     layer_shell: LayerShell,
 
-    exit: bool,
+    // Overlay surface
+    layer_surface: Option<LayerSurface>,
+    pool: Option<SlotPool>,
     width: u32,
     height: u32,
     scale: i32,
-    layer_surface: Option<LayerSurface>,
-    pool: Option<SlotPool>,
 
+    // Cursor and input
     pointer_x: f64,
     pointer_y: f64,
     cursor_shape_manager: Option<CursorShapeManager>,
     cursor_shape_device: Option<WpCursorShapeDeviceV1>,
 
+    // Rendering
     font: Option<fontdue::Font>,
     needs_redraw: bool,
     cached_pixmap: Option<Pixmap>,
     screenshot: Screenshot,
+
+    // App state
+    exit: bool,
 }
 
 impl PixelSnap {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         registry_state: RegistryState,
         seat_state: SeatState,
@@ -394,7 +401,7 @@ impl PointerHandler for PixelSnap {
                     self.needs_redraw = true;
                     self.draw(qh);
                 }
-                PointerEventKind::Press { button, .. } if button == 272 => {
+                PointerEventKind::Press { button: 272, .. } => {
                     self.exit = true;
                 }
                 _ => {}
