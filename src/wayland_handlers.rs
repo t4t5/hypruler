@@ -1,5 +1,5 @@
 use crate::capture::Screenshot;
-use crate::edge_detection::find_edges;
+use crate::edge_detection::{find_edges, snap_to_nearest_edge_x, snap_to_nearest_edge_y};
 use crate::ui::{draw_crosshair, draw_measurements, draw_rectangle_measurement};
 use std::process::Command;
 
@@ -498,7 +498,33 @@ impl PointerHandler for WaylandApp {
                         let width = x1.abs_diff(x2);
                         let height = y1.abs_diff(y2);
                         if width > 0 && height > 0 {
-                            self.drag_rect = Some((x1.min(x2), y1.min(y2), x1.max(x2), y1.max(y2)));
+                            // Snap each edge to the nearest detected edge
+                            let left = x1.min(x2);
+                            let right = x1.max(x2);
+                            let top = y1.min(y2);
+                            let bottom = y1.max(y2);
+
+                            // Calculate the center y for horizontal edge snapping
+                            // and center x for vertical edge snapping
+                            let center_y = (top + bottom) / 2;
+                            let center_x = (left + right) / 2;
+
+                            // Snap each edge using the center of the perpendicular axis
+                            let snapped_left =
+                                snap_to_nearest_edge_x(&self.screenshot, left, center_y);
+                            let snapped_right =
+                                snap_to_nearest_edge_x(&self.screenshot, right, center_y);
+                            let snapped_top =
+                                snap_to_nearest_edge_y(&self.screenshot, center_x, top);
+                            let snapped_bottom =
+                                snap_to_nearest_edge_y(&self.screenshot, center_x, bottom);
+
+                            self.drag_rect = Some((
+                                snapped_left.min(snapped_right),
+                                snapped_top.min(snapped_bottom),
+                                snapped_left.max(snapped_right),
+                                snapped_top.max(snapped_bottom),
+                            ));
                         } else {
                             // Click without drag - clear rectangle
                             self.drag_rect = None;
