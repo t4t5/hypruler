@@ -40,7 +40,7 @@ src/
 2. Move cursor to measure between detected edges (auto mode)
 3. Click and drag to draw a rectangle that snaps to content edges (manual mode)
 4. Click without dragging to clear the rectangle
-5. Dimensions shown as `{width} x {height}` near cursor or centered on rectangle
+5. Dimensions shown as `{width} x {height}` centered on large rectangles, or below small rectangles
 6. Press any key to exit
 
 ## Building
@@ -58,7 +58,7 @@ cargo build --release
 - `tiny-skia` - 2D rendering (lines, shapes)
 - `fontdue` - Font rasterization for labels
 - `memmap2` / `rustix` - Shared memory for screen capture
-- Font: `/usr/share/fonts/noto/NotoSans-Regular.ttf` (embedded at compile time)
+- Font: System sans-serif font discovered via `fc-match` at runtime
 
 ## Limitations
 

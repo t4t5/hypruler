@@ -110,8 +110,6 @@ pub fn draw_rectangle_measurement(
     y1: u32,
     x2: u32,
     y2: u32,
-    cursor_x: u32,
-    cursor_y: u32,
     font: Option<&fontdue::Font>,
 ) {
     let left = x1 as f32;
@@ -166,13 +164,15 @@ pub fn draw_rectangle_measurement(
         // Center on rectangle if large enough
         ((left + right) / 2.0, (top + bottom) / 2.0)
     } else {
-        // Position relative to cursor for small rectangles
-        get_label_position(
-            cursor_x as f32,
-            cursor_y as f32,
-            pixmap.width(),
-            pixmap.height(),
-        )
+        // Position at bottom center of rectangle
+        let center_x = (left + right) / 2.0;
+        let offset_y = 30.0;
+        let y = if bottom + offset_y > pixmap.height() as f32 - EDGE_THRESHOLD_Y {
+            top - offset_y // Move above if near bottom edge
+        } else {
+            bottom + offset_y
+        };
+        (center_x, y)
     };
     draw_label(pixmap, &format!("{} x {}", width, height), lx, ly, font);
 }
