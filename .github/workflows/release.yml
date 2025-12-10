@@ -18,7 +18,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build release binary
-        run: cargo build --release --locked
+        run: |
+          cargo build --release --locked
+          strip target/release/hypruler
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
