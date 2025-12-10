@@ -4,9 +4,9 @@ use std::ffi::CString;
 use std::fs::File;
 use std::os::fd::{AsFd, OwnedFd};
 use wayland_client::{
-    globals::{registry_queue_init, GlobalListContents},
-    protocol::{wl_buffer, wl_output, wl_registry, wl_shm, wl_shm_pool},
     Connection, Dispatch, Proxy, QueueHandle,
+    globals::{GlobalListContents, registry_queue_init},
+    protocol::{wl_buffer, wl_output, wl_registry, wl_shm, wl_shm_pool},
 };
 use wayland_protocols_wlr::screencopy::v1::client::{
     zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
@@ -75,19 +75,17 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for CaptureState {
     ) {
         match event {
             zwlr_screencopy_frame_v1::Event::Buffer {
-                format,
+                format: wayland_client::WEnum::Value(format),
                 width,
                 height,
                 stride,
             } => {
-                if let wayland_client::WEnum::Value(fmt) = format {
-                    state.format = Some(FrameFormat {
-                        format: fmt,
-                        width,
-                        height,
-                        stride,
-                    });
-                }
+                state.format = Some(FrameFormat {
+                    format,
+                    width,
+                    height,
+                    stride,
+                });
             }
             zwlr_screencopy_frame_v1::Event::BufferDone => {
                 state.done = true;

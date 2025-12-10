@@ -11,26 +11,26 @@ use smithay_client_toolkit::{
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     seat::{
+        Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
         pointer::{
-            cursor_shape::CursorShapeManager, PointerEvent, PointerEventKind, PointerHandler,
+            PointerEvent, PointerEventKind, PointerHandler, cursor_shape::CursorShapeManager,
         },
-        Capability, SeatHandler, SeatState,
     },
     shell::{
+        WaylandSurface,
         wlr_layer::{
             Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
             LayerSurfaceConfigure,
         },
-        WaylandSurface,
     },
-    shm::{slot::SlotPool, Shm, ShmHandler},
+    shm::{Shm, ShmHandler, slot::SlotPool},
 };
 use tiny_skia::Pixmap;
 use wayland_client::{
+    Connection, EventQueue, QueueHandle,
     globals::registry_queue_init,
     protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
-    Connection, EventQueue, QueueHandle,
 };
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{
     self, WpCursorShapeDeviceV1,
@@ -340,13 +340,13 @@ impl SeatHandler for WaylandApp {
         seat: wl_seat::WlSeat,
         capability: Capability,
     ) {
-        if capability == Capability::Pointer {
-            if let Ok(pointer) = self.seat_state.get_pointer(qh, &seat) {
-                if let Some(ref manager) = self.cursor_shape_manager {
-                    self.cursor_shape_device = Some(manager.get_shape_device(&pointer, qh));
-                }
-            }
+        if capability == Capability::Pointer
+            && let Ok(pointer) = self.seat_state.get_pointer(qh, &seat)
+            && let Some(ref manager) = self.cursor_shape_manager
+        {
+            self.cursor_shape_device = Some(manager.get_shape_device(&pointer, qh));
         }
+
         if capability == Capability::Keyboard {
             let _ = self.seat_state.get_keyboard(qh, &seat, None);
         }

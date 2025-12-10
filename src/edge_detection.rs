@@ -1,6 +1,6 @@
 use crate::capture::Screenshot;
 
-const EDGE_THRESHOLD: i32 = 25;
+const EDGE_THRESHOLD: i32 = 1;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Edges {
