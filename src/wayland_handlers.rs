@@ -60,7 +60,7 @@ pub struct WaylandApp {
     width: u32,
     height: u32,
     scale: i32,
-    target_output: wl_output::WlOutput,
+    target_output_name: Option<String>,
 
     // Cursor
     cursor_shape_manager: Option<CursorShapeManager>,
@@ -92,7 +92,7 @@ fn to_physical(logical: f64, scale: i32) -> u32 {
 }
 
 impl WaylandApp {
-    pub fn new(conn: &Connection, screenshot: Screenshot, target_output: wl_output::WlOutput) -> (Self, EventQueue<Self>) {
+    pub fn new(conn: &Connection, screenshot: Screenshot, target_output_name: Option<String>) -> (Self, EventQueue<Self>) {
         let (globals, event_queue) = registry_queue_init(conn).expect("Failed to init registry");
         let qh = event_queue.handle();
 
@@ -121,7 +121,7 @@ impl WaylandApp {
             width: 0,
             height: 0,
             scale: 1,
-            target_output,
+            target_output_name,
             cursor_shape_manager,
             cursor_shape_device: None,
             pointer_x: 0.0,
@@ -140,13 +140,20 @@ impl WaylandApp {
     }
 
     pub fn create_surface(&mut self, qh: &QueueHandle<Self>) {
+        // Find the target output by name using OutputState
+        let target_output = self.target_output_name.as_ref().and_then(|name| {
+            self.output_state
+                .outputs()
+                .find(|o| self.output_state.info(o).map(|i| i.name.as_deref() == Some(name)).unwrap_or(false))
+        });
+
         let surface = self.compositor_state.create_surface(qh);
         let layer_surface = self.layer_shell.create_layer_surface(
             qh,
             surface,
             Layer::Overlay,
             Some("hypruler"),
-            Some(&self.target_output),
+            target_output.as_ref(),
         );
 
         layer_surface.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
@@ -483,7 +490,11 @@ impl PointerHandler for WaylandApp {
                     self.pointer_x = event.position.0;
                     self.pointer_y = event.position.1;
                     self.needs_redraw = true;
-                    self.draw(qh);
+                    // Request frame callback - don't draw directly
+                    if let Some(ref layer_surface) = self.layer_surface {
+                        layer_surface.wl_surface().frame(qh, layer_surface.wl_surface().clone());
+                        layer_surface.wl_surface().commit();
+                    }
                 }
                 PointerEventKind::Press { button: 272, .. } => {
                     // Start drag
@@ -491,7 +502,10 @@ impl PointerHandler for WaylandApp {
                     self.is_dragging = true;
                     self.drag_rect = None;
                     self.needs_redraw = true;
-                    self.draw(qh);
+                    if let Some(ref layer_surface) = self.layer_surface {
+                        layer_surface.wl_surface().frame(qh, layer_surface.wl_surface().clone());
+                        layer_surface.wl_surface().commit();
+                    }
                 }
                 PointerEventKind::Release { button: 272, .. } => {
                     // End drag - finalize rectangle only if it has size
@@ -519,7 +533,10 @@ impl PointerHandler for WaylandApp {
                     }
                     self.is_dragging = false;
                     self.needs_redraw = true;
-                    self.draw(qh);
+                    if let Some(ref layer_surface) = self.layer_surface {
+                        layer_surface.wl_surface().frame(qh, layer_surface.wl_surface().clone());
+                        layer_surface.wl_surface().commit();
+                    }
                 }
                 _ => {}
             }

@@ -252,8 +252,13 @@ fn get_focused_monitor_name() -> Option<String> {
     monitors.into_iter().find(|m| m.focused).map(|m| m.name)
 }
 
-/// Enumerate all outputs and find the focused one
-pub fn find_focused_output(conn: &Connection) -> Result<wl_output::WlOutput, String> {
+/// Get the name of the focused output (or None to use first available)
+pub fn get_target_output_name() -> Option<String> {
+    get_focused_monitor_name()
+}
+
+/// Find an output by name, or return the first available
+fn find_output_by_name(conn: &Connection, target_name: Option<&str>) -> Result<wl_output::WlOutput, String> {
     let (globals, mut event_queue) = registry_queue_init::<OutputEnumState>(conn)
         .map_err(|e| format!("Failed to init registry: {}", e))?;
 
@@ -287,19 +292,23 @@ pub fn find_focused_output(conn: &Connection) -> Result<wl_output::WlOutput, Str
             .map_err(|e| format!("Dispatch error: {}", e))?;
     }
 
-    // Find the focused output, or fall back to first
-    let focused_name = get_focused_monitor_name();
-
+    // Find by name, or fall back to first
     let mut outputs = state.outputs.into_iter();
-    let output = outputs
-        .find(|o| o.name == focused_name)
-        .or_else(|| outputs.next())
-        .and_then(|o| o.output);
+    let output = if let Some(name) = target_name {
+        outputs.find(|o| o.name.as_deref() == Some(name))
+    } else {
+        None
+    }
+    .or_else(|| outputs.next())
+    .and_then(|o| o.output);
 
     output.ok_or_else(|| "No output found".to_string())
 }
 
-pub fn capture_screen(conn: &Connection, output: &wl_output::WlOutput) -> Result<Screenshot, String> {
+pub fn capture_screen(conn: &Connection, target_name: Option<&str>) -> Result<Screenshot, String> {
+    // First, find the target output
+    let output = find_output_by_name(conn, target_name)?;
+
     let (globals, mut event_queue) = registry_queue_init::<CaptureState>(conn)
         .map_err(|e| format!("Failed to init registry: {}", e))?;
 
@@ -314,7 +323,7 @@ pub fn capture_screen(conn: &Connection, output: &wl_output::WlOutput) -> Result
         .bind(&qh, 1..=1, ())
         .map_err(|_| "wl_shm not available")?;
 
-    let frame = screencopy_manager.capture_output(0, output, &qh, ());
+    let frame = screencopy_manager.capture_output(0, &output, &qh, ());
 
     while !state.done {
         event_queue
