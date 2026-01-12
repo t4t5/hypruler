@@ -180,6 +180,11 @@ impl WaylandApp {
         let phys_width = self.screenshot.width;
         let phys_height = self.screenshot.height;
 
+        // Derive scale from screenshot vs surface dimensions
+        if self.width > 0 {
+            self.scale = (phys_width / self.width) as i32;
+        }
+
         let cursor_phys_x = to_physical(self.pointer_x, self.scale);
         let cursor_phys_y = to_physical(self.pointer_y, self.scale);
 
