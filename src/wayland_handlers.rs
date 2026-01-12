@@ -12,7 +12,7 @@ use smithay_client_toolkit::{
     registry_handlers,
     seat::{
         Capability, SeatHandler, SeatState,
-        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
+        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
         pointer::{
             PointerEvent, PointerEventKind, PointerHandler, cursor_shape::CursorShapeManager,
         },
@@ -446,7 +446,18 @@ impl KeyboardHandler for WaylandApp {
         _: &wl_keyboard::WlKeyboard,
         _: u32,
         _: Modifiers,
+        _: RawModifiers,
         _: u32,
+    ) {
+    }
+
+    fn repeat_key(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _: u32,
+        _: KeyEvent,
     ) {
     }
 }
