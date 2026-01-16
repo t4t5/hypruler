@@ -302,7 +302,13 @@ fn draw_text(pixmap: &mut Pixmap, font: &fontdue::Font, text: &str, start_x: f32
 }
 
 fn draw_label(pixmap: &mut Pixmap, text: &str, x: f32, y: f32, font: Option<&fontdue::Font>) {
-    let text_width = text.len() as f32 * FONT_SIZE * 0.5;
+    let mut text_width = 0.0;
+    if let Some(font) = font {
+        for c in text.chars() {
+            let metrics = font.metrics(c, FONT_SIZE);
+            text_width += metrics.advance_width;
+        }
+    }
     let label_width = text_width + LABEL_PADDING.0 * 2.0;
     let label_height = FONT_SIZE + LABEL_PADDING.1 * 2.0;
     let label_x = x - label_width / 2.0;
