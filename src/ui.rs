@@ -64,7 +64,7 @@ pub fn draw_measurements(
     cursor_x: u32,
     cursor_y: u32,
     font: Option<&fontdue::Font>,
-    scale: i32,
+    scale: f64,
 ) {
     let mut paint = Paint::default();
     paint.set_color(line_color());
@@ -94,8 +94,8 @@ pub fn draw_measurements(
 
     // Dimension label (convert physical pixels to logical pixels)
     // Add 1 because distance from pixel N to pixel M is M - N + 1 pixels
-    let h_distance = (edges.right.saturating_sub(edges.left) + 1) / scale as u32;
-    let v_distance = (edges.down.saturating_sub(edges.up) + 1) / scale as u32;
+    let h_distance = ((edges.right.saturating_sub(edges.left) + 1) as f64 / scale).round() as u32;
+    let v_distance = ((edges.down.saturating_sub(edges.up) + 1) as f64 / scale).round() as u32;
     let (lx, ly) = get_label_position(cx, cy, pixmap.width(), pixmap.height());
     draw_label(
         pixmap,
@@ -113,7 +113,7 @@ pub fn draw_rectangle_measurement(
     x2: u32,
     y2: u32,
     font: Option<&fontdue::Font>,
-    scale: i32,
+    scale: f64,
 ) {
     let left = x1 as f32;
     let top = y1 as f32;
@@ -161,8 +161,8 @@ pub fn draw_rectangle_measurement(
     stroke_line(pixmap, &stroke_paint, &stroke, right, top, right, bottom);
 
     // Draw dimension label (convert physical pixels to logical pixels)
-    let width = (x2.saturating_sub(x1) + 1) / scale as u32;
-    let height = (y2.saturating_sub(y1) + 1) / scale as u32;
+    let width = ((x2.saturating_sub(x1) + 1) as f64 / scale).round() as u32;
+    let height = ((y2.saturating_sub(y1) + 1) as f64 / scale).round() as u32;
     // Use physical pixel sizes for layout threshold check
     let phys_width = x2.saturating_sub(x1) + 1;
     let phys_height = y2.saturating_sub(y1) + 1;

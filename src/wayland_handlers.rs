@@ -28,12 +28,19 @@ use smithay_client_toolkit::{
 };
 use tiny_skia::Pixmap;
 use wayland_client::{
-    Connection, EventQueue, QueueHandle,
+    Connection, Dispatch, EventQueue, Proxy, QueueHandle,
     globals::registry_queue_init,
     protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
 };
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{
     self, WpCursorShapeDeviceV1,
+};
+use wayland_protocols::wp::fractional_scale::v1::client::{
+    wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+    wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+};
+use wayland_protocols::wp::viewporter::client::{
+    wp_viewport::WpViewport, wp_viewporter::WpViewporter,
 };
 
 fn find_system_font() -> Option<Vec<u8>> {
@@ -59,8 +66,14 @@ pub struct WaylandApp {
     pool: Option<SlotPool>,
     width: u32,
     height: u32,
-    scale: i32,
+    scale: f64,
     target_output_name: Option<String>,
+
+    // Fractional scaling support
+    fractional_scale_manager: Option<WpFractionalScaleManagerV1>,
+    fractional_scale: Option<WpFractionalScaleV1>,
+    viewporter: Option<WpViewporter>,
+    viewport: Option<WpViewport>,
 
     // Cursor
     cursor_shape_manager: Option<CursorShapeManager>,
@@ -87,8 +100,8 @@ fn normalize_rect(x1: u32, y1: u32, x2: u32, y2: u32) -> (u32, u32, u32, u32) {
     (x1.min(x2), y1.min(y2), x1.max(x2), y1.max(y2))
 }
 
-fn to_physical(logical: f64, scale: i32) -> u32 {
-    (logical * scale as f64) as u32
+fn to_physical(logical: f64, scale: f64) -> u32 {
+    (logical * scale) as u32
 }
 
 impl WaylandApp {
@@ -109,6 +122,10 @@ impl WaylandApp {
         let registry_state = RegistryState::new(&globals);
         let cursor_shape_manager = CursorShapeManager::bind(&globals, &qh).ok();
 
+        let fractional_scale_manager: Option<WpFractionalScaleManagerV1> =
+            globals.bind(&qh, 1..=1, ()).ok();
+        let viewporter: Option<WpViewporter> = globals.bind(&qh, 1..=1, ()).ok();
+
         let font = find_system_font().and_then(|data| {
             fontdue::Font::from_bytes(data, fontdue::FontSettings::default()).ok()
         });
@@ -124,8 +141,12 @@ impl WaylandApp {
             pool: None,
             width: 0,
             height: 0,
-            scale: 1,
+            scale: 1.0,
             target_output_name,
+            fractional_scale_manager,
+            fractional_scale: None,
+            viewporter,
+            viewport: None,
             cursor_shape_manager,
             cursor_shape_device: None,
             pointer_x: 0.0,
@@ -155,6 +176,17 @@ impl WaylandApp {
         });
 
         let surface = self.compositor_state.create_surface(qh);
+
+        // Set up fractional scaling if available
+        if let Some(ref manager) = self.fractional_scale_manager {
+            self.fractional_scale = Some(manager.get_fractional_scale(&surface, qh, ()));
+        }
+
+        // Set up viewport if available
+        if let Some(ref viewporter) = self.viewporter {
+            self.viewport = Some(viewporter.get_viewport(&surface, qh, ()));
+        }
+
         let layer_surface = self.layer_shell.create_layer_surface(
             qh,
             surface,
@@ -187,9 +219,9 @@ impl WaylandApp {
         let phys_width = self.screenshot.width;
         let phys_height = self.screenshot.height;
 
-        // Derive scale from screenshot vs surface dimensions
-        if self.width > 0 {
-            self.scale = (phys_width / self.width) as i32;
+        // Derive scale from screenshot vs surface dimensions if fractional scale not set
+        if self.scale == 1.0 && self.width > 0 {
+            self.scale = phys_width as f64 / self.width as f64;
         }
 
         let cursor_phys_x = to_physical(self.pointer_x, self.scale);
@@ -295,7 +327,13 @@ impl WaylandApp {
         let layer_surface = self.layer_surface.as_ref().unwrap();
         let surface = layer_surface.wl_surface();
 
-        surface.set_buffer_scale(self.scale);
+        // Use viewport for fractional scaling, fall back to buffer_scale for integer
+        if let Some(ref viewport) = self.viewport {
+            viewport.set_destination(self.width as i32, self.height as i32);
+        } else {
+            surface.set_buffer_scale(self.scale.round() as i32);
+        }
+
         buffer.attach_to(surface).expect("Failed to attach buffer");
         surface.damage_buffer(0, 0, phys_width as i32, phys_height as i32);
         surface.commit();
@@ -312,8 +350,9 @@ impl CompositorHandler for WaylandApp {
         _surface: &wl_surface::WlSurface,
         new_factor: i32,
     ) {
-        if self.scale != new_factor {
-            self.scale = new_factor;
+        // Only use integer scale if fractional scaling is not available
+        if self.fractional_scale.is_none() && self.scale != new_factor as f64 {
+            self.scale = new_factor as f64;
             self.cached_pixmap = None;
             self.needs_redraw = true;
         }
@@ -596,3 +635,61 @@ delegate_keyboard!(WaylandApp);
 delegate_pointer!(WaylandApp);
 delegate_layer!(WaylandApp);
 delegate_registry!(WaylandApp);
+
+// Fractional scaling protocol handlers
+impl Dispatch<WpFractionalScaleManagerV1, ()> for WaylandApp {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WpFractionalScaleManagerV1,
+        _event: <WpFractionalScaleManagerV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WpFractionalScaleV1, ()> for WaylandApp {
+    fn event(
+        state: &mut Self,
+        _proxy: &WpFractionalScaleV1,
+        event: wp_fractional_scale_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+            let new_scale = scale as f64 / 120.0;
+            if (state.scale - new_scale).abs() > 0.001 {
+                state.scale = new_scale;
+                state.cached_pixmap = None;
+                state.needs_redraw = true;
+            }
+        }
+    }
+}
+
+// Viewporter protocol handlers
+impl Dispatch<WpViewporter, ()> for WaylandApp {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WpViewporter,
+        _event: <WpViewporter as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WpViewport, ()> for WaylandApp {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WpViewport,
+        _event: <WpViewport as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
