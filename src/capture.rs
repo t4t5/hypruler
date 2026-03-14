@@ -243,16 +243,17 @@ impl Screenshot {
 struct HyprMonitor {
     name: String,
     focused: bool,
+    transform: Option<u32>,
 }
 
-/// Get the name of the focused monitor from Hyprland
-pub fn get_focused_monitor_name() -> Option<String> {
+/// Get monitor info (name, transform) from Hyprland
+pub fn get_focused_monitor_info() -> Option<(String, u32)> {
     let output = Command::new("hyprctl")
         .args(["monitors", "-j"])
         .output()
         .ok()?;
     let monitors: Vec<HyprMonitor> = serde_json::from_slice(&output.stdout).ok()?;
-    monitors.into_iter().find(|m| m.focused).map(|m| m.name)
+    monitors.into_iter().find(|m| m.focused).map(|m| (m.name, m.transform.unwrap_or(0)))
 }
 
 /// Find an output by name, or return the first available
@@ -307,7 +308,11 @@ fn find_output_by_name(
     output.ok_or_else(|| "No output found".to_string())
 }
 
-pub fn capture_screen(conn: &Connection, target_name: Option<&str>) -> Result<Screenshot, String> {
+pub fn capture_screen(
+    conn: &Connection,
+    target_name: Option<&str>,
+    transform: u32,
+) -> Result<Screenshot, String> {
     // First, find the target output
     let output = find_output_by_name(conn, target_name)?;
 
@@ -399,14 +404,81 @@ pub fn capture_screen(conn: &Connection, target_name: Option<&str>) -> Result<Sc
         }
     }
 
+    // Check if monitor is rotated
+    // transform values: 0 = normal, 1 = 90°, 2 = 180°, 3 = 270°
+    let (final_width, final_height, final_luminance, final_bgra) = match transform {
+        1 | 3 => {
+            // 90° or 270° - need to swap dimensions and rotate
+            let new_width = format.height;
+            let new_height = format.width;
+            let new_pixel_count = (new_width * new_height) as usize;
+            let mut rotated_luminance = vec![0u8; new_pixel_count];
+            let mut rotated_bgra = vec![0u8; new_pixel_count * 4];
+
+            for y in 0..format.height {
+                for x in 0..format.width {
+                    let (new_x, new_y) = if transform == 1 {
+                        // 90° clockwise: new_x = height - 1 - y, new_y = x
+                        (format.height - 1 - y, x)
+                    } else {
+                        // 270° clockwise: new_x = y, new_y = width - 1 - x
+                        (y, format.width - 1 - x)
+                    };
+
+                    let src_idx = (y * format.width + x) as usize;
+                    let dst_idx = (new_y * new_width + new_x) as usize;
+
+                    rotated_luminance[dst_idx] = luminance[src_idx];
+
+                    let src_bgra = src_idx * 4;
+                    let dst_bgra = dst_idx * 4;
+                    rotated_bgra[dst_bgra] = bgra_data[src_bgra];
+                    rotated_bgra[dst_bgra + 1] = bgra_data[src_bgra + 1];
+                    rotated_bgra[dst_bgra + 2] = bgra_data[src_bgra + 2];
+                    rotated_bgra[dst_bgra + 3] = bgra_data[src_bgra + 3];
+                }
+            }
+
+            (new_width, new_height, rotated_luminance, rotated_bgra)
+        }
+        2 => {
+            // 180° - no dimension change, but need to flip both axes
+            let pixel_count = (format.width * format.height) as usize;
+            let mut rotated_luminance = vec![0u8; pixel_count];
+            let mut rotated_bgra = vec![0u8; pixel_count * 4];
+
+            for y in 0..format.height {
+                for x in 0..format.width {
+                    let new_x = format.width - 1 - x;
+                    let new_y = format.height - 1 - y;
+
+                    let src_idx = (y * format.width + x) as usize;
+                    let dst_idx = (new_y * format.width + new_x) as usize;
+
+                    rotated_luminance[dst_idx] = luminance[src_idx];
+
+                    let src_bgra = src_idx * 4;
+                    let dst_bgra = dst_idx * 4;
+                    rotated_bgra[dst_bgra] = bgra_data[src_bgra];
+                    rotated_bgra[dst_bgra + 1] = bgra_data[src_bgra + 1];
+                    rotated_bgra[dst_bgra + 2] = bgra_data[src_bgra + 2];
+                    rotated_bgra[dst_bgra + 3] = bgra_data[src_bgra + 3];
+                }
+            }
+
+            (format.width, format.height, rotated_luminance, rotated_bgra)
+        }
+        _ => (format.width, format.height, luminance, bgra_data),
+    };
+
     buffer.destroy();
     shm_pool.destroy();
     frame.destroy();
 
     Ok(Screenshot {
-        bgra_data,
-        width: format.width,
-        height: format.height,
-        luminance,
+        bgra_data: final_bgra,
+        width: final_width,
+        height: final_height,
+        luminance: final_luminance,
     })
 }
