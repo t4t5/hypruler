@@ -66,7 +66,7 @@ jobs:
           cat PKGBUILD
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v3
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.2
         with:
           pkgname: hypruler
           pkgbuild: ./PKGBUILD
@@ -93,7 +93,7 @@ jobs:
           cat PKGBUILD
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v3
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.2
         with:
           pkgname: hypruler-bin
           pkgbuild: ./PKGBUILD
