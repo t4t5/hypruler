@@ -3,16 +3,18 @@ mod edge_detection;
 mod ui;
 mod wayland_handlers;
 
-use capture::{capture_screen, get_focused_monitor_name};
+use capture::{capture_screen, get_focused_monitor_info};
 use wayland_client::Connection;
 use wayland_handlers::WaylandApp;
 
 fn main() {
     let conn = Connection::connect_to_env().expect("Failed to connect to Wayland");
 
-    let target_output_name = get_focused_monitor_name();
+    let monitor_info = get_focused_monitor_info();
+    let target_output_name = monitor_info.as_ref().map(|(name, _)| name.clone());
+    let transform = monitor_info.map(|(_, t)| t).unwrap_or(0);
 
-    let screenshot = match capture_screen(&conn, target_output_name.as_deref()) {
+    let screenshot = match capture_screen(&conn, target_output_name.as_deref(), transform) {
         Ok(s) => s,
         Err(_) => std::process::exit(1),
     };
