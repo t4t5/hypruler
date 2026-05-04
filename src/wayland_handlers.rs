@@ -43,6 +43,8 @@ use wayland_protocols::wp::viewporter::client::{
     wp_viewport::WpViewport, wp_viewporter::WpViewporter,
 };
 
+const BTN_LEFT: u32 = 272;
+
 fn find_system_font() -> Option<Vec<u8>> {
     let output = Command::new("fc-match")
         .args(["-f", "%{file}", "sans-serif"])
@@ -623,11 +625,7 @@ impl LayerShellHandler for WaylandApp {
             monitor.needs_redraw = true;
 
             // Resize pool if needed
-            let scale = if monitor.scale > 0.0 {
-                monitor.phys_width as f64 / monitor.width as f64
-            } else {
-                1.0
-            };
+            let scale = monitor.effective_scale();
             let phys_width = (monitor.width as f64 * scale) as u32;
             let phys_height = (monitor.height as f64 * scale) as u32;
             let pool_size = (phys_width * phys_height * 4) as usize;
@@ -819,7 +817,9 @@ impl PointerHandler for WaylandApp {
                             .commit();
                     }
                 }
-                PointerEventKind::Press { button: 272, .. } => {
+                PointerEventKind::Press {
+                    button: BTN_LEFT, ..
+                } => {
                     // Start drag
                     self.drag_start = Some((self.pointer_x, self.pointer_y));
                     self.is_dragging = true;
@@ -833,7 +833,9 @@ impl PointerHandler for WaylandApp {
                         monitor.layer_surface.wl_surface().commit();
                     }
                 }
-                PointerEventKind::Release { button: 272, .. } => {
+                PointerEventKind::Release {
+                    button: BTN_LEFT, ..
+                } => {
                     // End drag - finalize rectangle only if it has size
                     if let Some((start_x, start_y)) = self.drag_start {
                         let gx1 = start_x as i32;
