@@ -219,11 +219,23 @@ fn create_shm_fd() -> std::io::Result<OwnedFd> {
     }
 }
 
+#[derive(Debug)]
 pub struct Screenshot {
     bgra_data: Vec<u8>,
     pub width: u32,
     pub height: u32,
     luminance: Vec<u8>,
+}
+
+impl Clone for Screenshot {
+    fn clone(&self) -> Self {
+        Self {
+            bgra_data: self.bgra_data.clone(),
+            width: self.width,
+            height: self.height,
+            luminance: self.luminance.clone(),
+        }
+    }
 }
 
 impl Screenshot {
@@ -236,6 +248,58 @@ impl Screenshot {
             return 0;
         }
         self.luminance[(y * self.width + x) as usize]
+    }
+}
+
+/// Information about a monitor including its screenshot
+#[derive(Debug)]
+pub struct MonitorInfo {
+    pub name: String,
+    pub output: wl_output::WlOutput,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub scale: f64,
+    pub transform: u32,
+    pub screenshot: Option<Screenshot>,
+}
+
+impl Clone for MonitorInfo {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            output: self.output.clone(),
+            x: self.x,
+            y: self.y,
+            width: self.width,
+            height: self.height,
+            scale: self.scale,
+            transform: self.transform,
+            screenshot: self.screenshot.clone(),
+        }
+    }
+}
+
+/// All monitors with their screenshots
+pub struct MultiMonitorCapture {
+    pub monitors: Vec<MonitorInfo>,
+}
+
+impl MultiMonitorCapture {
+    /// Get the monitor that contains the given global coordinates
+    pub fn monitor_at(&self, x: f64, y: f64) -> Option<&MonitorInfo> {
+        self.monitors.iter().find(|m| {
+            let x = x as i32;
+            let y = y as i32;
+            x >= m.x && x < m.x + m.width as i32 && y >= m.y && y < m.y + m.height as i32
+        })
+    }
+
+    /// Get the focused monitor (first one with screenshot that covers the focused area)
+    pub fn focused_monitor(&self) -> Option<&MonitorInfo> {
+        // Find the first monitor that has a screenshot
+        self.monitors.iter().find(|m| m.screenshot.is_some())
     }
 }
 
@@ -254,6 +318,32 @@ pub fn get_focused_monitor_info() -> Option<(String, u32)> {
         .ok()?;
     let monitors: Vec<HyprMonitor> = serde_json::from_slice(&output.stdout).ok()?;
     monitors.into_iter().find(|m| m.focused).map(|m| (m.name, m.transform.unwrap_or(0)))
+}
+
+/// Get all monitor info from Hyprland
+#[derive(Deserialize)]
+struct HyprMonitorFull {
+    name: String,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    scale: f64,
+    transform: Option<u32>,
+}
+
+pub fn get_all_monitor_info() -> Option<Vec<(String, i32, i32, u32, u32, f64, u32)>> {
+    let output = Command::new("hyprctl")
+        .args(["monitors", "-j"])
+        .output()
+        .ok()?;
+    let monitors: Vec<HyprMonitorFull> = serde_json::from_slice(&output.stdout).ok()?;
+    Some(
+        monitors
+            .into_iter()
+            .map(|m| (m.name, m.x, m.y, m.width, m.height, m.scale, m.transform.unwrap_or(0)))
+            .collect(),
+    )
 }
 
 /// Find an output by name, or return the first available
@@ -306,6 +396,50 @@ fn find_output_by_name(
     .and_then(|o| o.output);
 
     output.ok_or_else(|| "No output found".to_string())
+}
+
+/// Find all outputs and return their info
+fn find_all_outputs(conn: &Connection) -> Result<Vec<(String, wl_output::WlOutput)>, String> {
+    let (globals, mut event_queue) = registry_queue_init::<OutputEnumState>(conn)
+        .map_err(|e| format!("Failed to init registry: {}", e))?;
+
+    let qh = event_queue.handle();
+    let output_globals: Vec<_> = globals
+        .contents()
+        .clone_list()
+        .into_iter()
+        .filter(|g| g.interface == "wl_output")
+        .collect();
+
+    if output_globals.is_empty() {
+        return Err("No outputs available".to_string());
+    }
+
+    let mut state = OutputEnumState {
+        outputs: vec![OutputInfo::default(); output_globals.len()],
+    };
+
+    // Bind all outputs
+    for (idx, global) in output_globals.iter().enumerate() {
+        let output: wl_output::WlOutput =
+            globals
+                .registry()
+                .bind(global.name, global.version.min(4), &qh, idx);
+        state.outputs[idx].output = Some(output);
+    }
+
+    // Wait for all outputs to report their info
+    while !state.outputs.iter().all(|o| o.done) {
+        event_queue
+            .blocking_dispatch(&mut state)
+            .map_err(|e| format!("Dispatch error: {}", e))?;
+    }
+
+    Ok(state
+        .outputs
+        .into_iter()
+        .filter_map(|o| o.name.zip(o.output))
+        .collect())
 }
 
 pub fn capture_screen(
@@ -481,4 +615,231 @@ pub fn capture_screen(
         height: final_height,
         luminance: final_luminance,
     })
+}
+
+/// Capture all monitors and return MultiMonitorCapture
+pub fn capture_all_monitors(conn: &Connection) -> Result<MultiMonitorCapture, String> {
+    // Get monitor info from Hyprland
+    let hypr_info = get_all_monitor_info().ok_or("Failed to get monitor info from Hyprland")?;
+
+    // Find all Wayland outputs
+    let outputs = find_all_outputs(conn)?;
+
+    // Build monitor info structure
+    let mut monitors = Vec::new();
+    for (name, x, y, width, height, scale, transform) in hypr_info {
+        // Find the corresponding Wayland output
+        if let Some((_, output)) = outputs.iter().find(|(n, _)| n == &name).cloned() {
+            monitors.push(MonitorInfo {
+                name,
+                output,
+                x,
+                y,
+                width,
+                height,
+                scale,
+                transform,
+                screenshot: None,
+            });
+        }
+    }
+
+    if monitors.is_empty() {
+        return Err("No monitors found".to_string());
+    }
+
+    // Capture each monitor
+    let (globals, mut event_queue) = registry_queue_init::<CaptureState>(conn)
+        .map_err(|e| format!("Failed to init registry: {}", e))?;
+
+    let qh = event_queue.handle();
+
+    let screencopy_manager: ZwlrScreencopyManagerV1 = globals
+        .bind(&qh, 3..=3, ())
+        .map_err(|_| "wlr-screencopy protocol not available. Is your compositor wlroots-based?")?;
+
+    let shm: wl_shm::WlShm = globals
+        .bind(&qh, 1..=1, ())
+        .map_err(|_| "wl_shm not available")?;
+
+    // Capture each monitor
+    for monitor in &mut monitors {
+        let mut state = CaptureState::new();
+        let frame = screencopy_manager.capture_output(0, &monitor.output, &qh, ());
+
+        while !state.done {
+            event_queue
+                .blocking_dispatch(&mut state)
+                .map_err(|e| format!("Dispatch error: {}", e))?;
+        }
+
+        let format = match state.format {
+            Some(f) => f,
+            None => continue, // Skip this monitor if format not available
+        };
+
+        let fd = create_shm_fd().map_err(|e| format!("Failed to create shm fd: {}", e))?;
+        let file = File::from(fd);
+        let size = (format.stride * format.height) as u64;
+        if file.set_len(size).is_err() {
+            continue;
+        }
+
+        let shm_pool = shm.create_pool(file.as_fd(), size as i32, &qh, ());
+        let buffer = shm_pool.create_buffer(
+            0,
+            format.width as i32,
+            format.height as i32,
+            format.stride as i32,
+            format.format,
+            &qh,
+            (),
+        );
+
+        frame.copy(&buffer);
+
+        while !state.ready && !state.failed {
+            if event_queue.blocking_dispatch(&mut state).is_err() {
+                break;
+            }
+        }
+
+        if state.failed {
+            buffer.destroy();
+            shm_pool.destroy();
+            frame.destroy();
+            continue;
+        }
+
+        let Ok(mmap) = (unsafe { MmapMut::map_mut(&file) }) else {
+            buffer.destroy();
+            shm_pool.destroy();
+            frame.destroy();
+            continue;
+        };
+        let data = mmap.to_vec();
+
+        // Pre-compute luminance and convert to BGRA
+        let pixel_count = (format.width * format.height) as usize;
+        let mut luminance = vec![0u8; pixel_count];
+        let mut bgra_data = vec![0u8; pixel_count * 4];
+
+        for y in 0..format.height {
+            for x in 0..format.width {
+                let src_idx = (y * format.stride + x * 4) as usize;
+                let dst_idx = (y * format.width + x) as usize;
+
+                if src_idx + 3 < data.len() {
+                    let (r, g, b) = match format.format {
+                        wl_shm::Format::Argb8888 | wl_shm::Format::Xrgb8888 => {
+                            (data[src_idx + 2], data[src_idx + 1], data[src_idx])
+                        }
+                        wl_shm::Format::Xbgr8888 | wl_shm::Format::Abgr8888 => {
+                            (data[src_idx], data[src_idx + 1], data[src_idx + 2])
+                        }
+                        _ => (data[src_idx + 2], data[src_idx + 1], data[src_idx]),
+                    };
+
+                    luminance[dst_idx] = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) as u8;
+
+                    let bgra_idx = dst_idx * 4;
+                    bgra_data[bgra_idx] = b;
+                    bgra_data[bgra_idx + 1] = g;
+                    bgra_data[bgra_idx + 2] = r;
+                    bgra_data[bgra_idx + 3] = 255;
+                }
+            }
+        }
+
+        // Apply transform
+        let (final_width, final_height, final_luminance, final_bgra) = apply_transform(
+            format.width,
+            format.height,
+            luminance,
+            bgra_data,
+            monitor.transform,
+        );
+
+        monitor.screenshot = Some(Screenshot {
+            bgra_data: final_bgra,
+            width: final_width,
+            height: final_height,
+            luminance: final_luminance,
+        });
+
+        buffer.destroy();
+        shm_pool.destroy();
+        frame.destroy();
+    }
+
+    Ok(MultiMonitorCapture { monitors })
+}
+
+fn apply_transform(
+    width: u32,
+    height: u32,
+    luminance: Vec<u8>,
+    bgra_data: Vec<u8>,
+    transform: u32,
+) -> (u32, u32, Vec<u8>, Vec<u8>) {
+    match transform {
+        1 | 3 => {
+            let new_width = height;
+            let new_height = width;
+            let new_pixel_count = (new_width * new_height) as usize;
+            let mut rotated_luminance = vec![0u8; new_pixel_count];
+            let mut rotated_bgra = vec![0u8; new_pixel_count * 4];
+
+            for y in 0..height {
+                for x in 0..width {
+                    let (new_x, new_y) = if transform == 1 {
+                        (height - 1 - y, x)
+                    } else {
+                        (y, width - 1 - x)
+                    };
+
+                    let src_idx = (y * width + x) as usize;
+                    let dst_idx = (new_y * new_width + new_x) as usize;
+
+                    rotated_luminance[dst_idx] = luminance[src_idx];
+
+                    let src_bgra = src_idx * 4;
+                    let dst_bgra = dst_idx * 4;
+                    rotated_bgra[dst_bgra] = bgra_data[src_bgra];
+                    rotated_bgra[dst_bgra + 1] = bgra_data[src_bgra + 1];
+                    rotated_bgra[dst_bgra + 2] = bgra_data[src_bgra + 2];
+                    rotated_bgra[dst_bgra + 3] = bgra_data[src_bgra + 3];
+                }
+            }
+
+            (new_width, new_height, rotated_luminance, rotated_bgra)
+        }
+        2 => {
+            let pixel_count = (width * height) as usize;
+            let mut rotated_luminance = vec![0u8; pixel_count];
+            let mut rotated_bgra = vec![0u8; pixel_count * 4];
+
+            for y in 0..height {
+                for x in 0..width {
+                    let new_x = width - 1 - x;
+                    let new_y = height - 1 - y;
+
+                    let src_idx = (y * width + x) as usize;
+                    let dst_idx = (new_y * width + new_x) as usize;
+
+                    rotated_luminance[dst_idx] = luminance[src_idx];
+
+                    let src_bgra = src_idx * 4;
+                    let dst_bgra = dst_idx * 4;
+                    rotated_bgra[dst_bgra] = bgra_data[src_bgra];
+                    rotated_bgra[dst_bgra + 1] = bgra_data[src_bgra + 1];
+                    rotated_bgra[dst_bgra + 2] = bgra_data[src_bgra + 2];
+                    rotated_bgra[dst_bgra + 3] = bgra_data[src_bgra + 3];
+                }
+            }
+
+            (width, height, rotated_luminance, rotated_bgra)
+        }
+        _ => (width, height, luminance, bgra_data),
+    }
 }
