@@ -219,23 +219,12 @@ fn create_shm_fd() -> std::io::Result<OwnedFd> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Screenshot {
     bgra_data: Vec<u8>,
     pub width: u32,
     pub height: u32,
     luminance: Vec<u8>,
-}
-
-impl Clone for Screenshot {
-    fn clone(&self) -> Self {
-        Self {
-            bgra_data: self.bgra_data.clone(),
-            width: self.width,
-            height: self.height,
-            luminance: self.luminance.clone(),
-        }
-    }
 }
 
 impl Screenshot {
@@ -252,7 +241,7 @@ impl Screenshot {
 }
 
 /// Information about a monitor including its screenshot
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MonitorInfo {
     pub name: String,
     pub output: wl_output::WlOutput,
@@ -265,23 +254,8 @@ pub struct MonitorInfo {
     pub screenshot: Option<Screenshot>,
 }
 
-impl Clone for MonitorInfo {
-    fn clone(&self) -> Self {
-        Self {
-            name: self.name.clone(),
-            output: self.output.clone(),
-            x: self.x,
-            y: self.y,
-            width: self.width,
-            height: self.height,
-            scale: self.scale,
-            transform: self.transform,
-            screenshot: self.screenshot.clone(),
-        }
-    }
-}
-
 /// All monitors with their screenshots
+#[derive(Debug, Clone)]
 pub struct MultiMonitorCapture {
     pub monitors: Vec<MonitorInfo>,
 }
