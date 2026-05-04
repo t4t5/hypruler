@@ -186,10 +186,6 @@ fn normalize_rect(x1: u32, y1: u32, x2: u32, y2: u32) -> (u32, u32, u32, u32) {
     (x1.min(x2), y1.min(y2), x1.max(x2), y1.max(y2))
 }
 
-fn to_physical(logical: f64, scale: f64) -> u32 {
-    (logical * scale) as u32
-}
-
 impl WaylandApp {
     pub fn new(conn: &Connection, multi_capture: MultiMonitorCapture) -> (Self, EventQueue<Self>) {
         let (globals, event_queue) = registry_queue_init(conn).expect("Failed to init registry");
@@ -276,11 +272,6 @@ impl WaylandApp {
         self.monitor_surfaces.iter().find(|m| m.contains(self.pointer_x, self.pointer_y))
     }
 
-    /// Get the monitor surface that contains the cursor (mutable)
-    fn active_monitor_mut(&mut self) -> Option<&mut MonitorSurface> {
-        self.monitor_surfaces.iter_mut().find(|m| m.contains(self.pointer_x, self.pointer_y))
-    }
-
     /// Get monitor info for the active monitor
     fn active_monitor_info(&self) -> Option<&MonitorInfo> {
         self.active_monitor().and_then(|ms| {
@@ -290,24 +281,6 @@ impl WaylandApp {
 
     pub fn should_exit(&self) -> bool {
         self.exit
-    }
-
-    fn draw(&mut self, qh: &QueueHandle<Self>) {
-        // Get the active monitor (where the cursor is)
-        let Some(active_idx) = self.monitor_surfaces.iter().position(|m| m.contains(self.pointer_x, self.pointer_y)) else {
-            // Cursor is not on any monitor, draw on first monitor to show something
-            if self.monitor_surfaces.is_empty() {
-                return;
-            }
-            // Just redraw all monitors that need it
-            for i in 0..self.monitor_surfaces.len() {
-                self.draw_monitor(i, qh);
-            }
-            return;
-        };
-
-        // Draw on the active monitor
-        self.draw_monitor(active_idx, qh);
     }
 
     fn draw_monitor(&mut self, idx: usize, _qh: &QueueHandle<Self>) {
