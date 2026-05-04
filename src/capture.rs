@@ -285,7 +285,17 @@ pub fn get_all_monitor_info() -> Option<Vec<(String, i32, i32, u32, u32, f64, u3
     Some(
         monitors
             .into_iter()
-            .map(|m| (m.name, m.x, m.y, m.width, m.height, m.scale, m.transform.unwrap_or(0)))
+            .map(|m| {
+                (
+                    m.name,
+                    m.x,
+                    m.y,
+                    m.width,
+                    m.height,
+                    m.scale,
+                    m.transform.unwrap_or(0),
+                )
+            })
             .collect(),
     )
 }
@@ -457,7 +467,8 @@ pub fn capture_all_monitors(conn: &Connection) -> Result<MultiMonitorCapture, St
                         _ => (data[src_idx + 2], data[src_idx + 1], data[src_idx]),
                     };
 
-                    luminance[dst_idx] = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) as u8;
+                    luminance[dst_idx] =
+                        (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) as u8;
 
                     let bgra_idx = dst_idx * 4;
                     bgra_data[bgra_idx] = b;
@@ -487,6 +498,10 @@ pub fn capture_all_monitors(conn: &Connection) -> Result<MultiMonitorCapture, St
         buffer.destroy();
         shm_pool.destroy();
         frame.destroy();
+    }
+
+    if monitors.iter().all(|m| m.screenshot.is_none()) {
+        return Err("Failed to capture any monitor".to_string());
     }
 
     Ok(MultiMonitorCapture { monitors })

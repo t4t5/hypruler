@@ -25,7 +25,10 @@ fn main() {
     // Roundtrip to ensure outputs are populated before creating surfaces
     event_queue.roundtrip(&mut app).unwrap();
 
-    app.create_surfaces(&qh);
+    if let Err(e) = app.create_surfaces(&qh) {
+        eprintln!("Failed to create monitor surfaces: {}", e);
+        std::process::exit(1);
+    }
 
     while !app.should_exit() {
         event_queue.blocking_dispatch(&mut app).unwrap();
