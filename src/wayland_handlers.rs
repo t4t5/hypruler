@@ -1,5 +1,5 @@
 use crate::capture::{MonitorInfo, MultiMonitorCapture};
-use crate::edge_detection::{find_edges, snap_edge_x, snap_edge_y};
+use crate::edge_detection::{find_edges, snap_edge_x_ignoring_rect, snap_edge_y_ignoring_rect};
 use crate::ui::{draw_crosshair, draw_measurements, draw_rectangle_measurement};
 use std::process::Command;
 
@@ -44,6 +44,7 @@ use wayland_protocols::wp::viewporter::client::{
 };
 
 const BTN_LEFT: u32 = 272;
+const CURSOR_SNAP_IGNORE_RADIUS: u32 = 48;
 
 fn find_system_font() -> Option<Vec<u8>> {
     let output = Command::new("fc-match")
@@ -52,6 +53,17 @@ fn find_system_font() -> Option<Vec<u8>> {
         .ok()?;
     let path = String::from_utf8(output.stdout).ok()?;
     std::fs::read(path.trim()).ok()
+}
+
+fn get_hyprland_cursor_position() -> Option<(f64, f64)> {
+    let output = Command::new("hyprctl").arg("cursorpos").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let (x, y) = stdout.trim().split_once(',')?;
+    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
 }
 
 // Per-monitor surface state
@@ -220,6 +232,7 @@ pub struct WaylandApp {
     // Core app state
     pointer_x: f64,
     pointer_y: f64,
+    pointer_valid: bool,
     font: Option<fontdue::Font>,
 
     // Drag-to-measure state (in global coordinates)
@@ -233,6 +246,15 @@ pub struct WaylandApp {
 
 fn normalize_rect(x1: u32, y1: u32, x2: u32, y2: u32) -> (u32, u32, u32, u32) {
     (x1.min(x2), y1.min(y2), x1.max(x2), y1.max(y2))
+}
+
+fn cursor_ignore_rect(x: u32, y: u32, width: u32, height: u32) -> (u32, u32, u32, u32) {
+    (
+        x.saturating_sub(CURSOR_SNAP_IGNORE_RADIUS),
+        y.saturating_sub(CURSOR_SNAP_IGNORE_RADIUS),
+        (x + CURSOR_SNAP_IGNORE_RADIUS).min(width.saturating_sub(1)),
+        (y + CURSOR_SNAP_IGNORE_RADIUS).min(height.saturating_sub(1)),
+    )
 }
 
 impl WaylandApp {
@@ -274,6 +296,7 @@ impl WaylandApp {
             cursor_shape_device: None,
             pointer_x: 0.0,
             pointer_y: 0.0,
+            pointer_valid: false,
             font,
             drag_start: None,
             drag_rect: None,
@@ -330,6 +353,28 @@ impl WaylandApp {
         self.exit
     }
 
+    fn update_pointer_from_event(&mut self, event: &PointerEvent) -> Option<usize> {
+        let monitor_idx = self
+            .monitor_surfaces
+            .iter()
+            .position(|m| m.layer_surface.wl_surface() == &event.surface)?;
+        let monitor = &self.monitor_surfaces[monitor_idx];
+        self.pointer_x = monitor.global_x as f64 + event.position.0;
+        self.pointer_y = monitor.global_y as f64 + event.position.1;
+        self.pointer_valid = true;
+        Some(monitor_idx)
+    }
+
+    fn update_pointer_from_hyprland(&mut self) -> bool {
+        let Some((x, y)) = get_hyprland_cursor_position() else {
+            return false;
+        };
+        self.pointer_x = x;
+        self.pointer_y = y;
+        self.pointer_valid = true;
+        true
+    }
+
     fn draw_monitor(&mut self, idx: usize, _qh: &QueueHandle<Self>) {
         // Check if redraw is needed
         {
@@ -363,7 +408,8 @@ impl WaylandApp {
             let phys_height = monitor.phys_height;
             let scale = monitor.effective_scale();
 
-            let contains_cursor = monitor.contains(self.pointer_x, self.pointer_y);
+            let contains_cursor =
+                self.pointer_valid && monitor.contains(self.pointer_x, self.pointer_y);
             let cursor_phys = monitor.to_local_physical(self.pointer_x, self.pointer_y);
 
             let active_drag_rect = if self.is_dragging {
@@ -759,31 +805,18 @@ impl PointerHandler for WaylandApp {
         for event in events {
             match event.kind {
                 PointerEventKind::Enter { serial, .. } => {
+                    self.update_pointer_from_event(event);
                     if let Some(ref device) = self.cursor_shape_device {
                         device.set_shape(serial, wp_cursor_shape_device_v1::Shape::Crosshair);
                     }
                 }
                 PointerEventKind::Motion { .. } => {
+                    let had_old_pointer = self.pointer_valid;
                     let old_x = self.pointer_x;
                     let old_y = self.pointer_y;
 
-                    // Convert local surface coordinates to global desktop coordinates
-                    // by finding which monitor/surface generated this event
-                    let event_surface = &event.surface;
-                    if let Some(monitor_idx) = self
-                        .monitor_surfaces
-                        .iter()
-                        .position(|m| m.layer_surface.wl_surface() == event_surface)
-                    {
-                        let monitor = &self.monitor_surfaces[monitor_idx];
-                        let local_x = event.position.0;
-                        let local_y = event.position.1;
-
-                        // Convert to global coordinates: global = monitor_origin + local
-                        self.pointer_x = monitor.global_x as f64 + local_x;
-                        self.pointer_y = monitor.global_y as f64 + local_y;
-
-                        // Mark this monitor as needing redraw
+                    // Convert local surface coordinates to global desktop coordinates.
+                    if let Some(monitor_idx) = self.update_pointer_from_event(event) {
                         self.monitor_surfaces[monitor_idx].needs_redraw = true;
                     }
 
@@ -795,7 +828,7 @@ impl PointerHandler for WaylandApp {
                         .enumerate()
                         .filter(|(_, m)| {
                             self.is_dragging
-                                || m.contains(old_x, old_y)
+                                || (had_old_pointer && m.contains(old_x, old_y))
                                 || m.contains(self.pointer_x, self.pointer_y)
                         })
                         .map(|(i, _)| i)
@@ -820,6 +853,9 @@ impl PointerHandler for WaylandApp {
                 PointerEventKind::Press {
                     button: BTN_LEFT, ..
                 } => {
+                    self.update_pointer_from_event(event);
+                    self.update_pointer_from_hyprland();
+
                     // Start drag
                     self.drag_start = Some((self.pointer_x, self.pointer_y));
                     self.is_dragging = true;
@@ -836,6 +872,9 @@ impl PointerHandler for WaylandApp {
                 PointerEventKind::Release {
                     button: BTN_LEFT, ..
                 } => {
+                    self.update_pointer_from_event(event);
+                    self.update_pointer_from_hyprland();
+
                     // End drag - finalize rectangle only if it has size
                     if let Some((start_x, start_y)) = self.drag_start {
                         let gx1 = start_x as i32;
@@ -867,15 +906,46 @@ impl PointerHandler for WaylandApp {
                                         monitor.to_local_physical(self.pointer_x, self.pointer_y);
                                     let (left, top, right, bottom) =
                                         normalize_rect(local_x1, local_y1, local_x2, local_y2);
+                                    let ignored_cursor_rect = Some(cursor_ignore_rect(
+                                        local_x1,
+                                        local_y1,
+                                        screenshot.width,
+                                        screenshot.height,
+                                    ));
 
-                                    // Snap each edge inward to nearby content.
-                                    let snapped_left =
-                                        snap_edge_x(screenshot, left, top, bottom, 1);
-                                    let snapped_right =
-                                        snap_edge_x(screenshot, right, top, bottom, -1);
-                                    let snapped_top = snap_edge_y(screenshot, left, right, top, 1);
-                                    let snapped_bottom =
-                                        snap_edge_y(screenshot, left, right, bottom, -1);
+                                    // Snap each edge inward to nearby content, ignoring the captured cursor area.
+                                    let snapped_left = snap_edge_x_ignoring_rect(
+                                        screenshot,
+                                        left,
+                                        top,
+                                        bottom,
+                                        1,
+                                        ignored_cursor_rect,
+                                    );
+                                    let snapped_right = snap_edge_x_ignoring_rect(
+                                        screenshot,
+                                        right,
+                                        top,
+                                        bottom,
+                                        -1,
+                                        ignored_cursor_rect,
+                                    );
+                                    let snapped_top = snap_edge_y_ignoring_rect(
+                                        screenshot,
+                                        left,
+                                        right,
+                                        top,
+                                        1,
+                                        ignored_cursor_rect,
+                                    );
+                                    let snapped_bottom = snap_edge_y_ignoring_rect(
+                                        screenshot,
+                                        left,
+                                        right,
+                                        bottom,
+                                        -1,
+                                        ignored_cursor_rect,
+                                    );
 
                                     Some((
                                         monitor.global_x + (snapped_left as f64 / scale) as i32,
