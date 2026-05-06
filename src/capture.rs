@@ -227,6 +227,32 @@ pub struct Screenshot {
 }
 
 impl Screenshot {
+    pub fn from_bgra_data(
+        width: u32,
+        height: u32,
+        bgra_data: Vec<u8>,
+    ) -> Result<Self, &'static str> {
+        let pixel_count = width as usize * height as usize;
+        if bgra_data.len() != pixel_count * 4 {
+            return Err("BGRA data length does not match dimensions");
+        }
+
+        let mut luminance = vec![0u8; pixel_count];
+        for (idx, pixel) in bgra_data.chunks_exact(4).enumerate() {
+            let b = pixel[0];
+            let g = pixel[1];
+            let r = pixel[2];
+            luminance[idx] = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) as u8;
+        }
+
+        Ok(Self {
+            bgra_data,
+            width,
+            height,
+            luminance,
+        })
+    }
+
     pub fn bgra_data(&self) -> &[u8] {
         &self.bgra_data
     }
@@ -253,7 +279,10 @@ pub fn get_focused_monitor_info() -> Option<(String, u32)> {
         .output()
         .ok()?;
     let monitors: Vec<HyprMonitor> = serde_json::from_slice(&output.stdout).ok()?;
-    monitors.into_iter().find(|m| m.focused).map(|m| (m.name, m.transform.unwrap_or(0)))
+    monitors
+        .into_iter()
+        .find(|m| m.focused)
+        .map(|m| (m.name, m.transform.unwrap_or(0)))
 }
 
 /// Find an output by name, or return the first available

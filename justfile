@@ -4,6 +4,9 @@ dev:
 build:
   cargo build --release
 
+bench:
+  cargo bench --bench draw -- --sample-size 10 --measurement-time 1 --warm-up-time 1
+
 start:
   ./target/release/hypruler
 

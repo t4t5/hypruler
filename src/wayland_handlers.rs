@@ -1,6 +1,6 @@
 use crate::capture::Screenshot;
-use crate::edge_detection::{find_edges, snap_edge_x, snap_edge_y};
-use crate::ui::{draw_crosshair, draw_measurements, draw_rectangle_measurement};
+use crate::edge_detection::{snap_edge_x, snap_edge_y};
+use crate::render::{FrameOverlay, compose_frame};
 use std::process::Command;
 
 use smithay_client_toolkit::{
@@ -224,9 +224,6 @@ impl WaylandApp {
             self.scale = phys_width as f64 / self.width as f64;
         }
 
-        let cursor_phys_x = to_physical(self.pointer_x, self.scale);
-        let cursor_phys_y = to_physical(self.pointer_y, self.scale);
-
         let pool = self.pool.as_mut().unwrap();
         let stride = phys_width as i32 * 4;
         let size = (stride * phys_height as i32) as usize;
@@ -244,85 +241,21 @@ impl WaylandApp {
             )
             .expect("Failed to create buffer");
 
-        // Copy pre-converted BGRA background
-        let bgra = self.screenshot.bgra_data();
-        let bgra_size = bgra.len().min(size);
-        canvas[..bgra_size].copy_from_slice(&bgra[..bgra_size]);
-
-        // Draw overlay
-        let needs_new_pixmap = self
-            .cached_pixmap
-            .as_ref()
-            .map(|p| p.width() != phys_width || p.height() != phys_height)
-            .unwrap_or(true);
-
-        if needs_new_pixmap {
-            self.cached_pixmap = Pixmap::new(phys_width, phys_height);
-        }
-
-        let pixmap = self.cached_pixmap.as_mut().unwrap();
-        pixmap.fill(tiny_skia::Color::TRANSPARENT);
-
-        if self.is_dragging {
-            // Draw rectangle from drag start to current cursor
-            if let Some((start_x, start_y)) = self.drag_start {
-                let (left, top, right, bottom) = normalize_rect(
-                    to_physical(start_x, self.scale),
-                    to_physical(start_y, self.scale),
-                    cursor_phys_x,
-                    cursor_phys_y,
-                );
-                draw_rectangle_measurement(
-                    pixmap,
-                    left,
-                    top,
-                    right,
-                    bottom,
-                    self.font.as_ref(),
-                    self.scale,
-                );
-            }
-        } else if cursor_phys_x < self.screenshot.width && cursor_phys_y < self.screenshot.height {
-            // Draw completed rectangle if exists
-            if let Some((x1, y1, x2, y2)) = self.drag_rect {
-                draw_rectangle_measurement(pixmap, x1, y1, x2, y2, self.font.as_ref(), self.scale);
-            }
-
-            // Always show edge detection and crosshair when not dragging
-            let edges = find_edges(&self.screenshot, cursor_phys_x, cursor_phys_y);
-            draw_measurements(
-                pixmap,
-                &edges,
-                cursor_phys_x,
-                cursor_phys_y,
-                self.font.as_ref(),
-                self.scale,
-            );
-            draw_crosshair(pixmap, cursor_phys_x as f32, cursor_phys_y as f32);
-        }
-
-        // Composite overlay onto canvas
-        let overlay_data = pixmap.data();
-        for (i, chunk) in canvas[..size].chunks_exact_mut(4).enumerate() {
-            let src_idx = i * 4;
-            let alpha = overlay_data[src_idx + 3];
-            if alpha > 0 {
-                let src_r = overlay_data[src_idx] as u32;
-                let src_g = overlay_data[src_idx + 1] as u32;
-                let src_b = overlay_data[src_idx + 2] as u32;
-                let src_a = alpha as u32;
-
-                let dst_b = chunk[0] as u32;
-                let dst_g = chunk[1] as u32;
-                let dst_r = chunk[2] as u32;
-
-                let inv_a = 255 - src_a;
-                chunk[0] = ((src_b * src_a + dst_b * inv_a) / 255) as u8;
-                chunk[1] = ((src_g * src_a + dst_g * inv_a) / 255) as u8;
-                chunk[2] = ((src_r * src_a + dst_r * inv_a) / 255) as u8;
-                chunk[3] = 255;
-            }
-        }
+        compose_frame(
+            canvas,
+            &mut self.cached_pixmap,
+            &self.screenshot,
+            FrameOverlay {
+                pointer_x: self.pointer_x,
+                pointer_y: self.pointer_y,
+                scale: self.scale,
+                drag_start: self.drag_start,
+                drag_rect: self.drag_rect,
+                is_dragging: self.is_dragging,
+            },
+            self.font.as_ref(),
+        )
+        .expect("Failed to compose frame");
 
         let layer_surface = self.layer_surface.as_ref().unwrap();
         let surface = layer_surface.wl_surface();

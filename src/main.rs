@@ -1,11 +1,6 @@
-mod capture;
-mod edge_detection;
-mod ui;
-mod wayland_handlers;
-
-use capture::{capture_screen, get_focused_monitor_info};
+use hypruler::capture::{capture_screen, get_focused_monitor_info};
+use hypruler::wayland_handlers::WaylandApp;
 use wayland_client::Connection;
-use wayland_handlers::WaylandApp;
 
 fn main() {
     let conn = Connection::connect_to_env().expect("Failed to connect to Wayland");
