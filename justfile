@@ -10,6 +10,10 @@ build-debug:
 start:
   ./target/release/hypruler
 
+check:
+  cargo check --all
+  cargo clippy --all
+
 start-debug:
   HYPRULER_DEBUG=1 ./target/release-debug/hypruler
 
