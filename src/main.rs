@@ -4,29 +4,32 @@ mod fps;
 mod ui;
 mod wayland_handlers;
 
-use capture::{capture_screen, get_focused_monitor_info};
+use capture::capture_all_monitors;
 use wayland_client::Connection;
 use wayland_handlers::WaylandApp;
 
 fn main() {
     let conn = Connection::connect_to_env().expect("Failed to connect to Wayland");
 
-    let monitor_info = get_focused_monitor_info();
-    let target_output_name = monitor_info.as_ref().map(|(name, _)| name.clone());
-    let transform = monitor_info.map(|(_, t)| t).unwrap_or(0);
-
-    let screenshot = match capture_screen(&conn, target_output_name.as_deref(), transform) {
-        Ok(s) => s,
-        Err(_) => std::process::exit(1),
+    // Capture all monitors
+    let multi_capture = match capture_all_monitors(&conn) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to capture monitors: {}", e);
+            std::process::exit(1);
+        }
     };
 
-    let (mut app, mut event_queue) = WaylandApp::new(&conn, screenshot, target_output_name);
+    let (mut app, mut event_queue) = WaylandApp::new(&conn, multi_capture);
     let qh = event_queue.handle();
 
-    // Roundtrip to ensure outputs are populated before creating surface
+    // Roundtrip to ensure outputs are populated before creating surfaces
     event_queue.roundtrip(&mut app).unwrap();
 
-    app.create_surface(&qh);
+    if let Err(e) = app.create_surfaces(&qh) {
+        eprintln!("Failed to create monitor surfaces: {}", e);
+        std::process::exit(1);
+    }
 
     while !app.should_exit() {
         event_queue.blocking_dispatch(&mut app).unwrap();
