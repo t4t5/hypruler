@@ -53,10 +53,11 @@ fn scan_for_edge(
         if pos < 0 || pos >= limit {
             return None;
         }
-        if let Some(max) = max_distance {
-            if steps > max {
-                return None;
-            }
+
+        if let Some(max) = max_distance
+            && steps > max
+        {
+            return None;
         }
 
         let lum = get_lum(pos) as i32;
