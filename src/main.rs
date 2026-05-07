@@ -1,5 +1,6 @@
 mod capture;
 mod edge_detection;
+mod fps;
 mod ui;
 mod wayland_handlers;
 

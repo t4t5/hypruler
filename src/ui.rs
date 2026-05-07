@@ -301,7 +301,13 @@ fn draw_text(pixmap: &mut Pixmap, font: &fontdue::Font, text: &str, start_x: f32
     }
 }
 
-fn draw_label(pixmap: &mut Pixmap, text: &str, x: f32, y: f32, font: Option<&fontdue::Font>) {
+pub(crate) fn draw_label(
+    pixmap: &mut Pixmap,
+    text: &str,
+    x: f32,
+    y: f32,
+    font: Option<&fontdue::Font>,
+) {
     let mut text_width = 0.0;
     if let Some(font) = font {
         for c in text.chars() {
