@@ -24,9 +24,6 @@ src/
   edge_detection.rs  - Edge detection (luminance-based boundary finding)
   ui.rs              - Drawing with tiny-skia (lines, crosshair, labels, rectangles)
 
-benches/
-  draw.rs            - Criterion bench for compose_frame at 1080p and 4K
-
 tests/
   alloc_budget.rs    - Per-frame allocation regression test (CI gate)
 ```
@@ -59,31 +56,31 @@ cargo build --release
 # Binary at target/release/hypruler
 ```
 
-## Benchmarks
+## Performance
 
-The per-frame composition runs on the drag hot path (every vsync, per dirty monitor) and dominates perceived lag. To make it measurable and to catch future regressions (e.g. an accidental `Vec` clone in the inner loop), the CPU composition is split out as a pure function `render::compose_frame(canvas, cached_pixmap, screenshot, overlay, font)` with no Wayland deps. `wayland_handlers` calls into it; benches and tests can call it directly.
+The per-frame composition runs on the drag hot path (every vsync) and dominates perceived lag, so we have two complementary tools to catch regressions:
+- an allocation budget check that can be run in CI
+- an FPS overlay so users can test end-to-end perceived performance in real environments
 
-Run with:
-
-```bash
-just bench
-```
-
-`benches/draw.rs` builds synthetic 1080p and 4K screenshots, calls `compose_frame` in a drag-state configuration, and uses Criterion to detect statistical regressions across runs. Add new bench cases here when changing the rendering path; aim to keep `compose_frame` allocation-free on steady state (the cached `Pixmap` is reused, the canvas is borrowed).
+The CPU composition is split out as a pure function `render::compose_frame(canvas, cached_pixmap, screenshot, overlay, font)` with no Wayland deps. `wayland_handlers` calls into it; tests can call it directly. `src/lib.rs` exists primarily so integration tests can import crate modules; `main.rs` uses the same library entrypoints rather than redeclaring modules.
 
 ### Allocation-budget CI gate
 
 In order to prevent performance regression, we have a test that measures per-frame allocations (a deterministic, hardware-independent number) and asserts they stay under generous thresholds. Run locally:
 
 ```bash
-just test-perf   # cargo test --test alloc_budget --release
+just test-perf
 ```
 
-How it works: an integration-test binary installs a `CountingAllocator` as `#[global_allocator]` that tracks bytes and allocation count. The test runs `compose_frame` in a 4K drag configuration 100 times, samples the counters before/after the loop (so test setup and warm-up don't pollute the measurement), and asserts both budgets. As of writing the steady-state cost is ~48 KiB / 51 allocs per frame; budgets are set at ~5× that. Tracks both axes because a bytes-only budget would miss death-by-many-small-allocations and a counts-only budget would miss a single 41 MB pixel-buffer clone — they cover different regression modes.
+How it works: an integration-test binary installs a `CountingAllocator` as `#[global_allocator]` that tracks bytes and allocation count.
 
-`.github/workflows/perf.yml` runs this test on every PR. A failure points at exactly the kind of regression that surfaced in the multi-monitor PR review (a `Screenshot::clone()` per frame inside `draw_monitor`). Tighten the budgets if you intentionally reduce per-frame allocations; loosen them only with a clear reason in the commit message.
+The test runs `compose_frame` in a 4K drag configuration 100 times, samples the counters before/after the loop (so test setup and warm-up don't pollute the measurement), and asserts both budgets.
 
-`src/lib.rs` exists primarily so the bench (and any future integration tests) can import crate modules; `main.rs` uses the same library entrypoints rather than redeclaring modules.
+As of writing the steady-state cost is ~48 KiB / 51 allocs per frame; budgets are set at ~5× that.
+
+Tracks both axes because a bytes-only budget would miss death-by-many-small-allocations and a counts-only budget would miss a single 41 MB pixel-buffer clone — they cover different regression modes.
+
+`.github/workflows/perf.yml` runs this test on every PR.
 
 ### Debug FPS overlay
 
@@ -96,7 +93,9 @@ just start-debug
 
 A debug-profile build (`cargo run`) would be slow enough that FPS measurements wouldn't reflect real user experience; the `release-debug` profile keeps optimizations.
 
-A small "FPS: XX" label is drawn in the top-left of the overlay, and per-frame timings are logged to stderr in the form `[hypruler-debug] dt=14.20ms fps=70.4`. The overlay is gated on both `cfg!(debug_assertions)` and the env var, so production release builds carry zero overhead and have no codepath to trigger it. Implementation: `FrameClock` (EMA-smoothed) ticks once per `frame()` callback in `wayland_handlers.rs`; the smoothed value is threaded into `FrameOverlay::debug_fps` and rendered by `compose_frame`. FPS is bounded by the compositor's vsync rate, so the useful signal is *drops* below it (e.g. 60 → 22 during a 4K drag).
+A small "FPS: XX" label is drawn in the top-left of the overlay, and per-frame timings are logged to stderr in the form `[hypruler-debug] dt=14.20ms fps=70.4`.
+
+The overlay is gated on both `cfg!(debug_assertions)` and the env var, so production release builds carry zero overhead and have no codepath to trigger it. Implementation: `FrameClock` (EMA-smoothed) ticks once per `frame()` callback in `wayland_handlers.rs`; the smoothed value is threaded into `FrameOverlay::debug_fps` and rendered by `compose_frame`. FPS is bounded by the compositor's vsync rate, so the useful signal is *drops* below it (e.g. 60 → 22 during a 4K drag).
 
 ## Dependencies
 
