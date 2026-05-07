@@ -17,10 +17,15 @@ A screen measurement tool for Hyprland/Sway (wlroots-based compositors), inspire
 ```
 src/
   main.rs            - Entry point (minimal - just connects and runs event loop)
-  wayland_handlers.rs - WaylandApp struct, all Wayland protocol handlers, rendering
+  lib.rs             - Library root, re-exports modules so benches/tests can use them
+  wayland_handlers.rs - WaylandApp struct and Wayland protocol handlers; delegates per-frame drawing to render::compose_frame
+  render.rs          - Pure CPU composition (compose_frame) — no Wayland deps, decoupled for benching
   capture.rs         - Focused monitor detection (hyprctl) and screen capture (wlr-screencopy)
   edge_detection.rs  - Edge detection (luminance-based boundary finding)
   ui.rs              - Drawing with tiny-skia (lines, crosshair, labels, rectangles)
+
+benches/
+  draw.rs            - Criterion bench for compose_frame at 1080p and 4K
 ```
 
 - **Screen capture** at physical resolution (e.g., 2880x1920 for HiDPI)
@@ -50,6 +55,21 @@ src/
 cargo build --release
 # Binary at target/release/hypruler
 ```
+
+## Benchmarks
+
+The per-frame composition runs on the drag hot path (every vsync, per dirty monitor) and dominates perceived lag. To make it measurable and to catch future regressions (e.g. an accidental `Vec` clone in the inner loop), the CPU composition is split out as a pure function `render::compose_frame(canvas, cached_pixmap, screenshot, overlay, font)` with no Wayland deps. `wayland_handlers` calls into it; benches and tests can call it directly.
+
+Run with:
+
+```bash
+just bench
+# wraps: cargo bench --bench draw
+```
+
+`benches/draw.rs` builds synthetic 1080p and 4K screenshots, calls `compose_frame` in a drag-state configuration, and uses Criterion to detect statistical regressions across runs. Add new bench cases here when changing the rendering path; aim to keep `compose_frame` allocation-free on steady state (the cached `Pixmap` is reused, the canvas is borrowed).
+
+`src/lib.rs` exists primarily so the bench (and any future integration tests) can import crate modules; `main.rs` uses the same library entrypoints rather than redeclaring modules.
 
 ## Dependencies
 
