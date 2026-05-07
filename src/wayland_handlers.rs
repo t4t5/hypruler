@@ -68,8 +68,8 @@ fn get_hyprland_cursor_position() -> Option<(f64, f64)> {
     Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
 }
 
-/// Borrowed references to the shared Wayland globals needed to construct per-monitor surfaces.
-struct WaylandContext<'a> {
+/// Shared Wayland globals borrowed by `MonitorSurface::new` to construct per-monitor surfaces.
+struct MonitorSurfaceContext<'a> {
     compositor_state: &'a CompositorState,
     layer_shell: &'a LayerShell,
     shm: &'a Shm,
@@ -99,7 +99,7 @@ struct MonitorSurface {
 
 impl MonitorSurface {
     fn new(
-        ctx: &WaylandContext,
+        ctx: &MonitorSurfaceContext,
         output: &wl_output::WlOutput,
         monitor_info: &MonitorInfo,
         idx: usize,
@@ -345,7 +345,7 @@ impl WaylandApp {
             .map(|(idx, _)| idx)
             .collect();
 
-        let ctx = WaylandContext {
+        let ctx = MonitorSurfaceContext {
             compositor_state: &self.compositor_state,
             layer_shell: &self.layer_shell,
             shm: &self.shm,
