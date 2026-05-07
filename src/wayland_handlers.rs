@@ -1,5 +1,5 @@
-use crate::capture::Screenshot;
-use crate::edge_detection::{find_edges, snap_edge_x, snap_edge_y};
+use crate::capture::{MonitorInfo, MultiMonitorCapture};
+use crate::edge_detection::{find_edges, snap_edge_x_ignoring_rect, snap_edge_y_ignoring_rect};
 use crate::ui::{draw_crosshair, draw_measurements, draw_rectangle_measurement};
 use std::process::Command;
 
@@ -43,6 +43,9 @@ use wayland_protocols::wp::viewporter::client::{
     wp_viewport::WpViewport, wp_viewporter::WpViewporter,
 };
 
+const BTN_LEFT: u32 = 272;
+const CURSOR_SNAP_IGNORE_RADIUS: u32 = 48;
+
 fn find_system_font() -> Option<Vec<u8>> {
     let output = Command::new("fc-match")
         .args(["-f", "%{file}", "sans-serif"])
@@ -50,6 +53,175 @@ fn find_system_font() -> Option<Vec<u8>> {
         .ok()?;
     let path = String::from_utf8(output.stdout).ok()?;
     std::fs::read(path.trim()).ok()
+}
+
+fn get_hyprland_cursor_position() -> Option<(f64, f64)> {
+    let output = Command::new("hyprctl").arg("cursorpos").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let (x, y) = stdout.trim().split_once(',')?;
+    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+}
+
+// Per-monitor surface state
+struct MonitorSurface {
+    layer_surface: LayerSurface,
+    pool: SlotPool,
+    width: u32,
+    height: u32,
+    scale: f64,
+    viewport: Option<WpViewport>,
+    fractional_scale: Option<WpFractionalScaleV1>,
+    cached_pixmap: Option<Pixmap>,
+    needs_redraw: bool,
+    // Global coordinates of this monitor
+    global_x: i32,
+    global_y: i32,
+    // Physical size of the screenshot
+    phys_width: u32,
+    phys_height: u32,
+}
+
+impl MonitorSurface {
+    fn new(
+        compositor_state: &CompositorState,
+        layer_shell: &LayerShell,
+        shm: &Shm,
+        qh: &QueueHandle<WaylandApp>,
+        output: &wl_output::WlOutput,
+        fractional_scale_manager: &Option<WpFractionalScaleManagerV1>,
+        viewporter: &Option<WpViewporter>,
+        monitor_info: &MonitorInfo,
+        idx: usize,
+    ) -> Self {
+        let surface = compositor_state.create_surface(qh);
+
+        // Set up fractional scaling if available (pass index as data)
+        let fractional_scale = fractional_scale_manager
+            .as_ref()
+            .map(|m| m.get_fractional_scale(&surface, qh, idx));
+
+        // Set up viewport if available
+        let viewport = viewporter
+            .as_ref()
+            .map(|v| v.get_viewport(&surface, qh, ()));
+
+        let layer_surface = layer_shell.create_layer_surface(
+            qh,
+            surface,
+            Layer::Overlay,
+            Some("hypruler"),
+            Some(output),
+        );
+
+        layer_surface.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
+        layer_surface.set_exclusive_zone(-1);
+        layer_surface.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        layer_surface.commit();
+
+        // Get physical dimensions from screenshot
+        let phys_width = monitor_info
+            .screenshot
+            .as_ref()
+            .map(|s| s.width)
+            .unwrap_or(monitor_info.width);
+        let phys_height = monitor_info
+            .screenshot
+            .as_ref()
+            .map(|s| s.height)
+            .unwrap_or(monitor_info.height);
+
+        // Initial pool size (will be resized on configure)
+        let pool_size = (phys_width * phys_height * 4) as usize;
+        let pool = SlotPool::new(pool_size, shm).expect("Failed to create pool");
+
+        Self {
+            layer_surface,
+            pool,
+            width: 0,
+            height: 0,
+            scale: monitor_info.scale,
+            viewport,
+            fractional_scale,
+            cached_pixmap: None,
+            needs_redraw: true,
+            global_x: monitor_info.x,
+            global_y: monitor_info.y,
+            phys_width,
+            phys_height,
+        }
+    }
+
+    /// Check if global coordinates are within this monitor
+    fn contains(&self, x: f64, y: f64) -> bool {
+        let x = x as i32;
+        let y = y as i32;
+        x >= self.global_x
+            && x < self.global_x + self.width as i32
+            && y >= self.global_y
+            && y < self.global_y + self.height as i32
+    }
+
+    fn effective_scale(&self) -> f64 {
+        if self.width > 0 {
+            self.phys_width as f64 / self.width as f64
+        } else if self.scale > 0.0 {
+            self.scale
+        } else {
+            1.0
+        }
+    }
+
+    /// Convert global logical coordinates to local physical coordinates.
+    fn to_local_physical(&self, global_x: f64, global_y: f64) -> (u32, u32) {
+        let scale = self.effective_scale();
+        let local_x =
+            ((global_x - self.global_x as f64) * scale).clamp(0.0, self.phys_width as f64);
+        let local_y =
+            ((global_y - self.global_y as f64) * scale).clamp(0.0, self.phys_height as f64);
+        (local_x as u32, local_y as u32)
+    }
+
+    fn intersects_global_rect(&self, x1: f64, y1: f64, x2: f64, y2: f64) -> bool {
+        let left = x1.min(x2);
+        let top = y1.min(y2);
+        let right = x1.max(x2);
+        let bottom = y1.max(y2);
+        let monitor_left = self.global_x as f64;
+        let monitor_top = self.global_y as f64;
+        let monitor_right = (self.global_x + self.width as i32) as f64;
+        let monitor_bottom = (self.global_y + self.height as i32) as f64;
+
+        right >= monitor_left
+            && left <= monitor_right
+            && bottom >= monitor_top
+            && top <= monitor_bottom
+    }
+
+    /// Clip a global logical rectangle to this monitor and convert it to local physical coordinates.
+    fn global_rect_to_local_physical(
+        &self,
+        gx1: i32,
+        gy1: i32,
+        gx2: i32,
+        gy2: i32,
+    ) -> Option<(u32, u32, u32, u32)> {
+        let left = gx1.min(gx2).max(self.global_x);
+        let top = gy1.min(gy2).max(self.global_y);
+        let right = gx1.max(gx2).min(self.global_x + self.width as i32);
+        let bottom = gy1.max(gy2).min(self.global_y + self.height as i32);
+
+        if right <= left || bottom <= top {
+            return None;
+        }
+
+        let (local_left, local_top) = self.to_local_physical(left as f64, top as f64);
+        let (local_right, local_bottom) = self.to_local_physical(right as f64, bottom as f64);
+        Some((local_left, local_top, local_right, local_bottom))
+    }
 }
 
 pub struct WaylandApp {
@@ -61,19 +233,13 @@ pub struct WaylandApp {
     shm: Shm,
     layer_shell: LayerShell,
 
-    // Overlay surface
-    layer_surface: Option<LayerSurface>,
-    pool: Option<SlotPool>,
-    width: u32,
-    height: u32,
-    scale: f64,
-    target_output_name: Option<String>,
+    // Multi-monitor surfaces
+    monitor_surfaces: Vec<MonitorSurface>,
+    monitors: Vec<MonitorInfo>,
 
     // Fractional scaling support
     fractional_scale_manager: Option<WpFractionalScaleManagerV1>,
-    fractional_scale: Option<WpFractionalScaleV1>,
     viewporter: Option<WpViewporter>,
-    viewport: Option<WpViewport>,
 
     // Cursor
     cursor_shape_manager: Option<CursorShapeManager>,
@@ -82,14 +248,12 @@ pub struct WaylandApp {
     // Core app state
     pointer_x: f64,
     pointer_y: f64,
+    pointer_valid: bool,
     font: Option<fontdue::Font>,
-    needs_redraw: bool,
-    cached_pixmap: Option<Pixmap>,
-    screenshot: Screenshot,
 
-    // Drag-to-measure state
+    // Drag-to-measure state (in global coordinates)
     drag_start: Option<(f64, f64)>,
-    drag_rect: Option<(u32, u32, u32, u32)>,
+    drag_rect: Option<(i32, i32, i32, i32)>, // Global coordinates (x1, y1, x2, y2)
     is_dragging: bool,
 
     // Control
@@ -100,16 +264,17 @@ fn normalize_rect(x1: u32, y1: u32, x2: u32, y2: u32) -> (u32, u32, u32, u32) {
     (x1.min(x2), y1.min(y2), x1.max(x2), y1.max(y2))
 }
 
-fn to_physical(logical: f64, scale: f64) -> u32 {
-    (logical * scale) as u32
+fn cursor_ignore_rect(x: u32, y: u32, width: u32, height: u32) -> (u32, u32, u32, u32) {
+    (
+        x.saturating_sub(CURSOR_SNAP_IGNORE_RADIUS),
+        y.saturating_sub(CURSOR_SNAP_IGNORE_RADIUS),
+        (x + CURSOR_SNAP_IGNORE_RADIUS).min(width.saturating_sub(1)),
+        (y + CURSOR_SNAP_IGNORE_RADIUS).min(height.saturating_sub(1)),
+    )
 }
 
 impl WaylandApp {
-    pub fn new(
-        conn: &Connection,
-        screenshot: Screenshot,
-        target_output_name: Option<String>,
-    ) -> (Self, EventQueue<Self>) {
+    pub fn new(conn: &Connection, multi_capture: MultiMonitorCapture) -> (Self, EventQueue<Self>) {
         let (globals, event_queue) = registry_queue_init(conn).expect("Failed to init registry");
         let qh = event_queue.handle();
 
@@ -130,6 +295,8 @@ impl WaylandApp {
             fontdue::Font::from_bytes(data, fontdue::FontSettings::default()).ok()
         });
 
+        let monitors = multi_capture.monitors;
+
         let app = Self {
             registry_state,
             seat_state,
@@ -137,24 +304,16 @@ impl WaylandApp {
             compositor_state,
             shm,
             layer_shell,
-            layer_surface: None,
-            pool: None,
-            width: 0,
-            height: 0,
-            scale: 1.0,
-            target_output_name,
+            monitor_surfaces: Vec::new(),
+            monitors,
             fractional_scale_manager,
-            fractional_scale: None,
             viewporter,
-            viewport: None,
             cursor_shape_manager,
             cursor_shape_device: None,
             pointer_x: 0.0,
             pointer_y: 0.0,
+            pointer_valid: false,
             font,
-            needs_redraw: true,
-            cached_pixmap: None,
-            screenshot,
             drag_start: None,
             drag_rect: None,
             is_dragging: false,
@@ -164,78 +323,160 @@ impl WaylandApp {
         (app, event_queue)
     }
 
-    pub fn create_surface(&mut self, qh: &QueueHandle<Self>) {
-        // Find the target output by name using OutputState
-        let target_output = self.target_output_name.as_ref().and_then(|name| {
-            self.output_state.outputs().find(|o| {
+    pub fn create_surfaces(&mut self, qh: &QueueHandle<Self>) -> Result<(), String> {
+        let monitor_indices: Vec<_> = self
+            .monitors
+            .iter()
+            .enumerate()
+            .filter(|(_, monitor)| monitor.screenshot.is_some())
+            .map(|(idx, _)| idx)
+            .collect();
+
+        // Create a surface for each monitor that has a screenshot.
+        for monitor_idx in monitor_indices {
+            let monitor = &self.monitors[monitor_idx];
+
+            // Find the wl_output for this monitor.
+            let output = self.output_state.outputs().find(|o| {
                 self.output_state
                     .info(o)
-                    .map(|i| i.name.as_deref() == Some(name))
+                    .map(|i| i.name.as_deref() == Some(&monitor.name))
                     .unwrap_or(false)
-            })
-        });
+            });
 
-        let surface = self.compositor_state.create_surface(qh);
-
-        // Set up fractional scaling if available
-        if let Some(ref manager) = self.fractional_scale_manager {
-            self.fractional_scale = Some(manager.get_fractional_scale(&surface, qh, ()));
+            if let Some(ref output) = output {
+                let surface_idx = self.monitor_surfaces.len();
+                let surface = MonitorSurface::new(
+                    &self.compositor_state,
+                    &self.layer_shell,
+                    &self.shm,
+                    qh,
+                    output,
+                    &self.fractional_scale_manager,
+                    &self.viewporter,
+                    monitor,
+                    surface_idx,
+                );
+                self.monitor_surfaces.push(surface);
+            }
         }
 
-        // Set up viewport if available
-        if let Some(ref viewporter) = self.viewporter {
-            self.viewport = Some(viewporter.get_viewport(&surface, qh, ()));
+        if self.monitor_surfaces.is_empty() {
+            return Err("No monitor surfaces created".to_string());
         }
 
-        let layer_surface = self.layer_shell.create_layer_surface(
-            qh,
-            surface,
-            Layer::Overlay,
-            Some("hypruler"),
-            target_output.as_ref(),
-        );
-
-        layer_surface.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
-        layer_surface.set_exclusive_zone(-1);
-        layer_surface.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
-        layer_surface.commit();
-
-        self.layer_surface = Some(layer_surface);
+        Ok(())
     }
 
     pub fn should_exit(&self) -> bool {
         self.exit
     }
 
-    fn draw(&mut self, _qh: &QueueHandle<Self>) {
-        if self.layer_surface.is_none() || self.pool.is_none() {
+    fn update_pointer_from_event(&mut self, event: &PointerEvent) -> Option<usize> {
+        let monitor_idx = self
+            .monitor_surfaces
+            .iter()
+            .position(|m| m.layer_surface.wl_surface() == &event.surface)?;
+        let monitor = &self.monitor_surfaces[monitor_idx];
+        self.pointer_x = monitor.global_x as f64 + event.position.0;
+        self.pointer_y = monitor.global_y as f64 + event.position.1;
+        self.pointer_valid = true;
+        Some(monitor_idx)
+    }
+
+    fn update_pointer_from_hyprland(&mut self) -> bool {
+        let Some((x, y)) = get_hyprland_cursor_position() else {
+            return false;
+        };
+        self.pointer_x = x;
+        self.pointer_y = y;
+        self.pointer_valid = true;
+        true
+    }
+
+    fn draw_monitor(&mut self, idx: usize, _qh: &QueueHandle<Self>) {
+        // Check if redraw is needed
+        {
+            let monitor = &self.monitor_surfaces[idx];
+            if monitor.width == 0 || monitor.height == 0 || !monitor.needs_redraw {
+                return;
+            }
+        }
+
+        // Borrow the screenshot instead of cloning it on every redraw.
+        let monitor_info_idx = self.monitors.iter().position(|m| {
+            m.x == self.monitor_surfaces[idx].global_x && m.y == self.monitor_surfaces[idx].global_y
+        });
+        let Some(screenshot) = monitor_info_idx.and_then(|i| self.monitors[i].screenshot.as_ref())
+        else {
             return;
-        }
-        if self.width == 0 || self.height == 0 || !self.needs_redraw {
-            return;
-        }
-        self.needs_redraw = false;
+        };
 
-        let phys_width = self.screenshot.width;
-        let phys_height = self.screenshot.height;
+        // Collect data we need from the monitor before mutable borrow
+        let (
+            phys_width,
+            phys_height,
+            scale,
+            contains_cursor,
+            cursor_phys,
+            active_drag_rect,
+            completed_drag_rect,
+        ) = {
+            let monitor = &self.monitor_surfaces[idx];
+            let phys_width = monitor.phys_width;
+            let phys_height = monitor.phys_height;
+            let scale = monitor.effective_scale();
 
-        // Derive scale from screenshot vs surface dimensions if fractional scale not set
-        if self.scale == 1.0 && self.width > 0 {
-            self.scale = phys_width as f64 / self.width as f64;
-        }
+            let contains_cursor =
+                self.pointer_valid && monitor.contains(self.pointer_x, self.pointer_y);
+            let cursor_phys = monitor.to_local_physical(self.pointer_x, self.pointer_y);
 
-        let cursor_phys_x = to_physical(self.pointer_x, self.scale);
-        let cursor_phys_y = to_physical(self.pointer_y, self.scale);
+            let active_drag_rect = if self.is_dragging {
+                self.drag_start.and_then(|(start_x, start_y)| {
+                    monitor.global_rect_to_local_physical(
+                        start_x as i32,
+                        start_y as i32,
+                        self.pointer_x as i32,
+                        self.pointer_y as i32,
+                    )
+                })
+            } else {
+                None
+            };
 
-        let pool = self.pool.as_mut().unwrap();
+            let completed_drag_rect = if self.is_dragging {
+                None
+            } else {
+                self.drag_rect.and_then(|(gx1, gy1, gx2, gy2)| {
+                    monitor.global_rect_to_local_physical(gx1, gy1, gx2, gy2)
+                })
+            };
+
+            (
+                phys_width,
+                phys_height,
+                scale,
+                contains_cursor,
+                cursor_phys,
+                active_drag_rect,
+                completed_drag_rect,
+            )
+        };
+
+        // Mark as redrawn
+        self.monitor_surfaces[idx].needs_redraw = false;
+
+        // Now do the actual drawing with mutable borrow
+        let monitor = &mut self.monitor_surfaces[idx];
         let stride = phys_width as i32 * 4;
         let size = (stride * phys_height as i32) as usize;
 
-        if pool.len() < size {
-            pool.resize(size).expect("Failed to resize pool");
+        if monitor.pool.len() < size {
+            monitor.pool.resize(size).expect("Failed to resize pool");
         }
 
-        let (buffer, canvas) = pool
+        let (buffer, canvas) = monitor
+            .pool
             .create_buffer(
                 phys_width as i32,
                 phys_height as i32,
@@ -245,33 +486,27 @@ impl WaylandApp {
             .expect("Failed to create buffer");
 
         // Copy pre-converted BGRA background
-        let bgra = self.screenshot.bgra_data();
+        let bgra = screenshot.bgra_data();
         let bgra_size = bgra.len().min(size);
         canvas[..bgra_size].copy_from_slice(&bgra[..bgra_size]);
 
         // Draw overlay
-        let needs_new_pixmap = self
+        let needs_new_pixmap = monitor
             .cached_pixmap
             .as_ref()
             .map(|p| p.width() != phys_width || p.height() != phys_height)
             .unwrap_or(true);
 
         if needs_new_pixmap {
-            self.cached_pixmap = Pixmap::new(phys_width, phys_height);
+            monitor.cached_pixmap = Pixmap::new(phys_width, phys_height);
         }
 
-        let pixmap = self.cached_pixmap.as_mut().unwrap();
+        let pixmap = monitor.cached_pixmap.as_mut().unwrap();
         pixmap.fill(tiny_skia::Color::TRANSPARENT);
 
         if self.is_dragging {
-            // Draw rectangle from drag start to current cursor
-            if let Some((start_x, start_y)) = self.drag_start {
-                let (left, top, right, bottom) = normalize_rect(
-                    to_physical(start_x, self.scale),
-                    to_physical(start_y, self.scale),
-                    cursor_phys_x,
-                    cursor_phys_y,
-                );
+            // Draw the active rectangle clipped to this monitor.
+            if let Some((left, top, right, bottom)) = active_drag_rect {
                 draw_rectangle_measurement(
                     pixmap,
                     left,
@@ -279,26 +514,40 @@ impl WaylandApp {
                     right,
                     bottom,
                     self.font.as_ref(),
-                    self.scale,
+                    scale,
                 );
             }
-        } else if cursor_phys_x < self.screenshot.width && cursor_phys_y < self.screenshot.height {
-            // Draw completed rectangle if exists
-            if let Some((x1, y1, x2, y2)) = self.drag_rect {
-                draw_rectangle_measurement(pixmap, x1, y1, x2, y2, self.font.as_ref(), self.scale);
+        } else {
+            // Draw the completed rectangle clipped to this monitor.
+            if let Some((left, top, right, bottom)) = completed_drag_rect {
+                draw_rectangle_measurement(
+                    pixmap,
+                    left,
+                    top,
+                    right,
+                    bottom,
+                    self.font.as_ref(),
+                    scale,
+                );
             }
 
-            // Always show edge detection and crosshair when not dragging
-            let edges = find_edges(&self.screenshot, cursor_phys_x, cursor_phys_y);
-            draw_measurements(
-                pixmap,
-                &edges,
-                cursor_phys_x,
-                cursor_phys_y,
-                self.font.as_ref(),
-                self.scale,
-            );
-            draw_crosshair(pixmap, cursor_phys_x as f32, cursor_phys_y as f32);
+            // Always show edge detection and crosshair when not dragging (only on active monitor)
+            let (cursor_phys_x, cursor_phys_y) = cursor_phys;
+            if contains_cursor
+                && cursor_phys_x < screenshot.width
+                && cursor_phys_y < screenshot.height
+            {
+                let edges = find_edges(screenshot, cursor_phys_x, cursor_phys_y);
+                draw_measurements(
+                    pixmap,
+                    &edges,
+                    cursor_phys_x,
+                    cursor_phys_y,
+                    self.font.as_ref(),
+                    scale,
+                );
+                draw_crosshair(pixmap, cursor_phys_x as f32, cursor_phys_y as f32);
+            }
         }
 
         // Composite overlay onto canvas
@@ -324,14 +573,13 @@ impl WaylandApp {
             }
         }
 
-        let layer_surface = self.layer_surface.as_ref().unwrap();
-        let surface = layer_surface.wl_surface();
+        let surface = monitor.layer_surface.wl_surface();
 
         // Use viewport for fractional scaling, fall back to buffer_scale for integer
-        if let Some(ref viewport) = self.viewport {
-            viewport.set_destination(self.width as i32, self.height as i32);
+        if let Some(ref viewport) = monitor.viewport {
+            viewport.set_destination(monitor.width as i32, monitor.height as i32);
         } else {
-            surface.set_buffer_scale(self.scale.round() as i32);
+            surface.set_buffer_scale(scale.round() as i32);
         }
 
         buffer.attach_to(surface).expect("Failed to attach buffer");
@@ -347,14 +595,20 @@ impl CompositorHandler for WaylandApp {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
+        surface: &wl_surface::WlSurface,
         new_factor: i32,
     ) {
-        // Only use integer scale if fractional scaling is not available
-        if self.fractional_scale.is_none() && self.scale != new_factor as f64 {
-            self.scale = new_factor as f64;
-            self.cached_pixmap = None;
-            self.needs_redraw = true;
+        // Find the monitor surface that owns this surface
+        for monitor in &mut self.monitor_surfaces {
+            if monitor.layer_surface.wl_surface() == surface {
+                // Only use integer scale if fractional scaling is not available
+                if monitor.fractional_scale.is_none() && monitor.scale != new_factor as f64 {
+                    monitor.scale = new_factor as f64;
+                    monitor.cached_pixmap = None;
+                    monitor.needs_redraw = true;
+                }
+                break;
+            }
         }
     }
 
@@ -367,8 +621,21 @@ impl CompositorHandler for WaylandApp {
     ) {
     }
 
-    fn frame(&mut self, _: &Connection, qh: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
-        self.draw(qh);
+    fn frame(
+        &mut self,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+        surface: &wl_surface::WlSurface,
+        _: u32,
+    ) {
+        // Find which monitor this surface belongs to and redraw
+        if let Some(idx) = self
+            .monitor_surfaces
+            .iter()
+            .position(|m| m.layer_surface.wl_surface() == surface)
+        {
+            self.draw_monitor(idx, qh);
+        }
     }
 
     fn surface_enter(
@@ -408,23 +675,39 @@ impl LayerShellHandler for WaylandApp {
         &mut self,
         _: &Connection,
         qh: &QueueHandle<Self>,
-        _: &LayerSurface,
+        layer_surface: &LayerSurface,
         configure: LayerSurfaceConfigure,
         _: u32,
     ) {
-        self.width = configure.new_size.0;
-        self.height = configure.new_size.1;
+        // Find the monitor surface that owns this layer_surface
+        if let Some(monitor) = self
+            .monitor_surfaces
+            .iter_mut()
+            .find(|m| &m.layer_surface == layer_surface)
+        {
+            monitor.width = configure.new_size.0;
+            monitor.height = configure.new_size.1;
+            monitor.needs_redraw = true;
 
-        let phys_width = self.width * self.scale as u32;
-        let phys_height = self.height * self.scale as u32;
-        let pool_size = (phys_width * phys_height * 4) as usize;
+            // Resize pool if needed
+            let scale = monitor.effective_scale();
+            let phys_width = (monitor.width as f64 * scale) as u32;
+            let phys_height = (monitor.height as f64 * scale) as u32;
+            let pool_size = (phys_width * phys_height * 4) as usize;
 
-        if self.pool.is_none() {
-            self.pool = Some(SlotPool::new(pool_size, &self.shm).expect("Failed to create pool"));
+            if monitor.pool.len() < pool_size {
+                let _ = monitor.pool.resize(pool_size);
+            }
+
+            // Find index and draw
+            if let Some(idx) = self
+                .monitor_surfaces
+                .iter()
+                .position(|m| &m.layer_surface == layer_surface)
+            {
+                self.draw_monitor(idx, qh);
+            }
         }
-
-        self.needs_redraw = true;
-        self.draw(qh);
     }
 }
 
@@ -540,72 +823,226 @@ impl PointerHandler for WaylandApp {
     ) {
         for event in events {
             match event.kind {
-                PointerEventKind::Enter { serial } => {
+                PointerEventKind::Enter { serial, .. } => {
+                    self.update_pointer_from_event(event);
                     if let Some(ref device) = self.cursor_shape_device {
                         device.set_shape(serial, wp_cursor_shape_device_v1::Shape::Crosshair);
                     }
                 }
                 PointerEventKind::Motion { .. } => {
-                    self.pointer_x = event.position.0;
-                    self.pointer_y = event.position.1;
-                    self.needs_redraw = true;
-                    // Request frame callback - don't draw directly
-                    if let Some(ref layer_surface) = self.layer_surface {
-                        layer_surface
+                    let had_old_pointer = self.pointer_valid;
+                    let old_x = self.pointer_x;
+                    let old_y = self.pointer_y;
+
+                    // Convert local surface coordinates to global desktop coordinates.
+                    if let Some(monitor_idx) = self.update_pointer_from_event(event) {
+                        self.monitor_surfaces[monitor_idx].needs_redraw = true;
+                    }
+
+                    // When dragging, redraw only monitors touched by the previous or current drag rect.
+                    // Otherwise only redraw the monitor where the cursor was and where it is now.
+                    let drag_start = self.drag_start;
+                    let monitors_to_redraw: Vec<_> = self
+                        .monitor_surfaces
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, m)| {
+                            if self.is_dragging {
+                                drag_start
+                                    .map(|(start_x, start_y)| {
+                                        m.intersects_global_rect(start_x, start_y, old_x, old_y)
+                                            || m.intersects_global_rect(
+                                                start_x,
+                                                start_y,
+                                                self.pointer_x,
+                                                self.pointer_y,
+                                            )
+                                    })
+                                    .unwrap_or(false)
+                            } else {
+                                (had_old_pointer && m.contains(old_x, old_y))
+                                    || m.contains(self.pointer_x, self.pointer_y)
+                            }
+                        })
+                        .map(|(i, _)| i)
+                        .collect();
+
+                    for idx in monitors_to_redraw {
+                        self.monitor_surfaces[idx].needs_redraw = true;
+                        let surface = self.monitor_surfaces[idx]
+                            .layer_surface
                             .wl_surface()
-                            .frame(qh, layer_surface.wl_surface().clone());
-                        layer_surface.wl_surface().commit();
+                            .clone();
+                        self.monitor_surfaces[idx]
+                            .layer_surface
+                            .wl_surface()
+                            .frame(qh, surface);
+                        self.monitor_surfaces[idx]
+                            .layer_surface
+                            .wl_surface()
+                            .commit();
                     }
                 }
-                PointerEventKind::Press { button: 272, .. } => {
+                PointerEventKind::Press {
+                    button: BTN_LEFT, ..
+                } => {
+                    self.update_pointer_from_event(event);
+                    self.update_pointer_from_hyprland();
+
                     // Start drag
+                    let had_drag_rect = self.drag_rect.is_some();
                     self.drag_start = Some((self.pointer_x, self.pointer_y));
                     self.is_dragging = true;
                     self.drag_rect = None;
-                    self.needs_redraw = true;
-                    if let Some(ref layer_surface) = self.layer_surface {
-                        layer_surface
-                            .wl_surface()
-                            .frame(qh, layer_surface.wl_surface().clone());
-                        layer_surface.wl_surface().commit();
+
+                    // Redraw all monitors only when clearing an existing rectangle; otherwise redraw the current monitor.
+                    for monitor in &mut self.monitor_surfaces {
+                        if had_drag_rect || monitor.contains(self.pointer_x, self.pointer_y) {
+                            monitor.needs_redraw = true;
+                            let surface = monitor.layer_surface.wl_surface().clone();
+                            monitor.layer_surface.wl_surface().frame(qh, surface);
+                            monitor.layer_surface.wl_surface().commit();
+                        }
                     }
                 }
-                PointerEventKind::Release { button: 272, .. } => {
+                PointerEventKind::Release {
+                    button: BTN_LEFT, ..
+                } => {
+                    self.update_pointer_from_event(event);
+                    self.update_pointer_from_hyprland();
+
                     // End drag - finalize rectangle only if it has size
                     if let Some((start_x, start_y)) = self.drag_start {
-                        let (left, top, right, bottom) = normalize_rect(
-                            to_physical(start_x, self.scale),
-                            to_physical(start_y, self.scale),
-                            to_physical(self.pointer_x, self.scale),
-                            to_physical(self.pointer_y, self.scale),
-                        );
-                        if right > left && bottom > top {
-                            // Snap each edge inward to nearby content
-                            let snapped_left = snap_edge_x(&self.screenshot, left, top, bottom, 1);
-                            let snapped_right =
-                                snap_edge_x(&self.screenshot, right, top, bottom, -1);
-                            let snapped_top = snap_edge_y(&self.screenshot, left, right, top, 1);
-                            let snapped_bottom =
-                                snap_edge_y(&self.screenshot, left, right, bottom, -1);
+                        let gx1 = start_x as i32;
+                        let gy1 = start_y as i32;
+                        let gx2 = self.pointer_x as i32;
+                        let gy2 = self.pointer_y as i32;
+                        let normalized_global =
+                            (gx1.min(gx2), gy1.min(gy2), gx1.max(gx2), gy1.max(gy2));
 
-                            self.drag_rect = Some(normalize_rect(
-                                snapped_left,
-                                snapped_top,
-                                snapped_right,
-                                snapped_bottom,
-                            ));
+                        if (gx2 - gx1).abs() > 1 && (gy2 - gy1).abs() > 1 {
+                            let snapped_rect = self
+                                .monitor_surfaces
+                                .iter()
+                                .position(|m| {
+                                    m.contains(start_x, start_y)
+                                        && m.contains(self.pointer_x, self.pointer_y)
+                                })
+                                .and_then(|monitor_idx| {
+                                    let monitor = &self.monitor_surfaces[monitor_idx];
+                                    let monitor_info = self.monitors.iter().find(|m| {
+                                        m.x == monitor.global_x && m.y == monitor.global_y
+                                    })?;
+                                    let screenshot = monitor_info.screenshot.as_ref()?;
+                                    let scale = monitor.effective_scale();
+
+                                    let (local_x1, local_y1) =
+                                        monitor.to_local_physical(start_x, start_y);
+                                    let (local_x2, local_y2) =
+                                        monitor.to_local_physical(self.pointer_x, self.pointer_y);
+                                    let (left, top, right, bottom) =
+                                        normalize_rect(local_x1, local_y1, local_x2, local_y2);
+                                    let ignored_cursor_rect = Some(cursor_ignore_rect(
+                                        local_x1,
+                                        local_y1,
+                                        screenshot.width,
+                                        screenshot.height,
+                                    ));
+
+                                    // Snap each edge inward to nearby content, ignoring the captured cursor area.
+                                    let snapped_left = snap_edge_x_ignoring_rect(
+                                        screenshot,
+                                        left,
+                                        top,
+                                        bottom,
+                                        1,
+                                        ignored_cursor_rect,
+                                    );
+                                    let snapped_right = snap_edge_x_ignoring_rect(
+                                        screenshot,
+                                        right,
+                                        top,
+                                        bottom,
+                                        -1,
+                                        ignored_cursor_rect,
+                                    );
+                                    let snapped_top = snap_edge_y_ignoring_rect(
+                                        screenshot,
+                                        left,
+                                        right,
+                                        top,
+                                        1,
+                                        ignored_cursor_rect,
+                                    );
+                                    let snapped_bottom = snap_edge_y_ignoring_rect(
+                                        screenshot,
+                                        left,
+                                        right,
+                                        bottom,
+                                        -1,
+                                        ignored_cursor_rect,
+                                    );
+
+                                    Some((
+                                        monitor.global_x + (snapped_left as f64 / scale) as i32,
+                                        monitor.global_y + (snapped_top as f64 / scale) as i32,
+                                        monitor.global_x + (snapped_right as f64 / scale) as i32,
+                                        monitor.global_y + (snapped_bottom as f64 / scale) as i32,
+                                    ))
+                                });
+
+                            self.drag_rect = Some(snapped_rect.unwrap_or(normalized_global));
                         } else {
                             // Click without drag - clear rectangle
                             self.drag_rect = None;
                         }
                     }
+                    let released_x = self.pointer_x;
+                    let released_y = self.pointer_y;
+                    let release_drag_start = self.drag_start;
+                    let final_drag_rect = self.drag_rect;
+                    self.drag_start = None;
                     self.is_dragging = false;
-                    self.needs_redraw = true;
-                    if let Some(ref layer_surface) = self.layer_surface {
-                        layer_surface
+
+                    // Redraw only monitors touched by the active/final rectangle, plus the cursor monitor.
+                    let monitors_to_redraw: Vec<_> = self
+                        .monitor_surfaces
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, monitor)| {
+                            monitor.contains(released_x, released_y)
+                                || release_drag_start
+                                    .map(|(start_x, start_y)| {
+                                        monitor.intersects_global_rect(
+                                            start_x, start_y, released_x, released_y,
+                                        )
+                                    })
+                                    .unwrap_or(false)
+                                || final_drag_rect
+                                    .map(|(x1, y1, x2, y2)| {
+                                        monitor.intersects_global_rect(
+                                            x1 as f64, y1 as f64, x2 as f64, y2 as f64,
+                                        )
+                                    })
+                                    .unwrap_or(false)
+                        })
+                        .map(|(idx, _)| idx)
+                        .collect();
+
+                    for idx in monitors_to_redraw {
+                        self.monitor_surfaces[idx].needs_redraw = true;
+                        let surface = self.monitor_surfaces[idx]
+                            .layer_surface
                             .wl_surface()
-                            .frame(qh, layer_surface.wl_surface().clone());
-                        layer_surface.wl_surface().commit();
+                            .clone();
+                        self.monitor_surfaces[idx]
+                            .layer_surface
+                            .wl_surface()
+                            .frame(qh, surface);
+                        self.monitor_surfaces[idx]
+                            .layer_surface
+                            .wl_surface()
+                            .commit();
                     }
                 }
                 _ => {}
@@ -649,21 +1086,26 @@ impl Dispatch<WpFractionalScaleManagerV1, ()> for WaylandApp {
     }
 }
 
-impl Dispatch<WpFractionalScaleV1, ()> for WaylandApp {
+// Store index of monitor being configured (used for fractional scale events)
+impl Dispatch<WpFractionalScaleV1, usize> for WaylandApp {
     fn event(
         state: &mut Self,
         _proxy: &WpFractionalScaleV1,
         event: wp_fractional_scale_v1::Event,
-        _data: &(),
+        data: &usize,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
         if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
-            let new_scale = scale as f64 / 120.0;
-            if (state.scale - new_scale).abs() > 0.001 {
-                state.scale = new_scale;
-                state.cached_pixmap = None;
-                state.needs_redraw = true;
+            let idx = *data;
+            if idx < state.monitor_surfaces.len() {
+                let new_scale = scale as f64 / 120.0;
+                let monitor = &mut state.monitor_surfaces[idx];
+                if (monitor.scale - new_scale).abs() > 0.001 {
+                    monitor.scale = new_scale;
+                    monitor.cached_pixmap = None;
+                    monitor.needs_redraw = true;
+                }
             }
         }
     }

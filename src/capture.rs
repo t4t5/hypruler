@@ -219,6 +219,7 @@ fn create_shm_fd() -> std::io::Result<OwnedFd> {
     }
 }
 
+#[derive(Debug)]
 pub struct Screenshot {
     bgra_data: Vec<u8>,
     pub width: u32,
@@ -239,28 +240,52 @@ impl Screenshot {
     }
 }
 
-#[derive(Deserialize)]
-struct HyprMonitor {
-    name: String,
-    focused: bool,
-    transform: Option<u32>,
+/// Information about a monitor including its screenshot
+#[derive(Debug)]
+pub struct MonitorInfo {
+    pub name: String,
+    pub output: wl_output::WlOutput,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub scale: f64,
+    pub transform: u32,
+    pub screenshot: Option<Screenshot>,
 }
 
-/// Get monitor info (name, transform) from Hyprland
-pub fn get_focused_monitor_info() -> Option<(String, u32)> {
+/// All monitors with their screenshots
+#[derive(Debug)]
+pub struct MultiMonitorCapture {
+    pub monitors: Vec<MonitorInfo>,
+}
+
+impl MultiMonitorCapture {
+    // Methods can be added here as needed
+}
+
+/// Get all monitor info from Hyprland
+#[derive(Deserialize, Debug, Clone)]
+pub struct HyprMonitorFull {
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub scale: f64,
+    pub transform: Option<u32>,
+}
+
+pub fn get_all_monitor_info() -> Option<Vec<HyprMonitorFull>> {
     let output = Command::new("hyprctl")
         .args(["monitors", "-j"])
         .output()
         .ok()?;
-    let monitors: Vec<HyprMonitor> = serde_json::from_slice(&output.stdout).ok()?;
-    monitors.into_iter().find(|m| m.focused).map(|m| (m.name, m.transform.unwrap_or(0)))
+    serde_json::from_slice(&output.stdout).ok()
 }
 
-/// Find an output by name, or return the first available
-fn find_output_by_name(
-    conn: &Connection,
-    target_name: Option<&str>,
-) -> Result<wl_output::WlOutput, String> {
+/// Find all outputs and return their info
+fn find_all_outputs(conn: &Connection) -> Result<Vec<(String, wl_output::WlOutput)>, String> {
     let (globals, mut event_queue) = registry_queue_init::<OutputEnumState>(conn)
         .map_err(|e| format!("Failed to init registry: {}", e))?;
 
@@ -282,10 +307,11 @@ fn find_output_by_name(
 
     // Bind all outputs
     for (idx, global) in output_globals.iter().enumerate() {
-        let _: wl_output::WlOutput =
+        let output: wl_output::WlOutput =
             globals
                 .registry()
                 .bind(global.name, global.version.min(4), &qh, idx);
+        state.outputs[idx].output = Some(output);
     }
 
     // Wait for all outputs to report their info
@@ -295,32 +321,49 @@ fn find_output_by_name(
             .map_err(|e| format!("Dispatch error: {}", e))?;
     }
 
-    // Find by name, or fall back to first
-    let mut outputs = state.outputs.into_iter();
-    let output = if let Some(name) = target_name {
-        outputs.find(|o| o.name.as_deref() == Some(name))
-    } else {
-        None
-    }
-    .or_else(|| outputs.next())
-    .and_then(|o| o.output);
-
-    output.ok_or_else(|| "No output found".to_string())
+    Ok(state
+        .outputs
+        .into_iter()
+        .filter_map(|o| o.name.zip(o.output))
+        .collect())
 }
 
-pub fn capture_screen(
-    conn: &Connection,
-    target_name: Option<&str>,
-    transform: u32,
-) -> Result<Screenshot, String> {
-    // First, find the target output
-    let output = find_output_by_name(conn, target_name)?;
+/// Capture all monitors and return MultiMonitorCapture
+pub fn capture_all_monitors(conn: &Connection) -> Result<MultiMonitorCapture, String> {
+    // Get monitor info from Hyprland
+    let hypr_info = get_all_monitor_info().ok_or("Failed to get monitor info from Hyprland")?;
 
+    // Find all Wayland outputs
+    let outputs = find_all_outputs(conn)?;
+
+    // Build monitor info structure
+    let mut monitors = Vec::new();
+    for info in hypr_info {
+        // Find the corresponding Wayland output
+        if let Some((_, output)) = outputs.iter().find(|(n, _)| n == &info.name).cloned() {
+            monitors.push(MonitorInfo {
+                name: info.name,
+                output,
+                x: info.x,
+                y: info.y,
+                width: info.width,
+                height: info.height,
+                scale: info.scale,
+                transform: info.transform.unwrap_or(0),
+                screenshot: None,
+            });
+        }
+    }
+
+    if monitors.is_empty() {
+        return Err("No monitors found".to_string());
+    }
+
+    // Capture each monitor
     let (globals, mut event_queue) = registry_queue_init::<CaptureState>(conn)
         .map_err(|e| format!("Failed to init registry: {}", e))?;
 
     let qh = event_queue.handle();
-    let mut state = CaptureState::new();
 
     let screencopy_manager: ZwlrScreencopyManagerV1 = globals
         .bind(&qh, 3..=3, ())
@@ -330,102 +373,160 @@ pub fn capture_screen(
         .bind(&qh, 1..=1, ())
         .map_err(|_| "wl_shm not available")?;
 
-    let frame = screencopy_manager.capture_output(0, &output, &qh, ());
+    // Capture each monitor. Keep running if an individual output fails, but report why.
+    for monitor in &mut monitors {
+        let capture_result = (|| -> Result<Screenshot, String> {
+            let mut state = CaptureState::new();
+            let frame = screencopy_manager.capture_output(0, &monitor.output, &qh, ());
 
-    while !state.done {
-        event_queue
-            .blocking_dispatch(&mut state)
-            .map_err(|e| format!("Dispatch error: {}", e))?;
-    }
-
-    let format = state.format.ok_or("No suitable buffer format received")?;
-
-    let fd = create_shm_fd().map_err(|e| format!("Failed to create shm fd: {}", e))?;
-    let file = File::from(fd);
-    let size = (format.stride * format.height) as u64;
-    file.set_len(size)
-        .map_err(|e| format!("Failed to set file size: {}", e))?;
-
-    let shm_pool = shm.create_pool(file.as_fd(), size as i32, &qh, ());
-    let buffer = shm_pool.create_buffer(
-        0,
-        format.width as i32,
-        format.height as i32,
-        format.stride as i32,
-        format.format,
-        &qh,
-        (),
-    );
-
-    frame.copy(&buffer);
-
-    while !state.ready && !state.failed {
-        event_queue
-            .blocking_dispatch(&mut state)
-            .map_err(|e| format!("Dispatch error: {}", e))?;
-    }
-
-    if state.failed {
-        return Err("Screen capture failed".to_string());
-    }
-
-    let mmap = unsafe { MmapMut::map_mut(&file) }.map_err(|e| format!("Failed to mmap: {}", e))?;
-    let data = mmap.to_vec();
-
-    // Pre-compute luminance and convert to BGRA in one pass
-    let pixel_count = (format.width * format.height) as usize;
-    let mut luminance = vec![0u8; pixel_count];
-    let mut bgra_data = vec![0u8; pixel_count * 4];
-
-    for y in 0..format.height {
-        for x in 0..format.width {
-            let src_idx = (y * format.stride + x * 4) as usize;
-            let dst_idx = (y * format.width + x) as usize;
-
-            if src_idx + 3 < data.len() {
-                let (r, g, b) = match format.format {
-                    wl_shm::Format::Argb8888 | wl_shm::Format::Xrgb8888 => {
-                        (data[src_idx + 2], data[src_idx + 1], data[src_idx])
-                    }
-                    wl_shm::Format::Xbgr8888 | wl_shm::Format::Abgr8888 => {
-                        (data[src_idx], data[src_idx + 1], data[src_idx + 2])
-                    }
-                    _ => (data[src_idx + 2], data[src_idx + 1], data[src_idx]),
-                };
-
-                luminance[dst_idx] = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) as u8;
-
-                let bgra_idx = dst_idx * 4;
-                bgra_data[bgra_idx] = b;
-                bgra_data[bgra_idx + 1] = g;
-                bgra_data[bgra_idx + 2] = r;
-                bgra_data[bgra_idx + 3] = 255;
+            while !state.done {
+                event_queue
+                    .blocking_dispatch(&mut state)
+                    .map_err(|e| format!("Dispatch error: {}", e))?;
             }
+
+            let format = state.format.ok_or("No suitable buffer format received")?;
+            let fd = create_shm_fd().map_err(|e| format!("Failed to create shm fd: {}", e))?;
+            let file = File::from(fd);
+            let size = (format.stride * format.height) as u64;
+            file.set_len(size)
+                .map_err(|e| format!("Failed to set file size: {}", e))?;
+
+            let shm_pool = shm.create_pool(file.as_fd(), size as i32, &qh, ());
+            let buffer = shm_pool.create_buffer(
+                0,
+                format.width as i32,
+                format.height as i32,
+                format.stride as i32,
+                format.format,
+                &qh,
+                (),
+            );
+
+            frame.copy(&buffer);
+
+            let capture_status = (|| -> Result<(), String> {
+                while !state.ready && !state.failed {
+                    event_queue
+                        .blocking_dispatch(&mut state)
+                        .map_err(|e| format!("Dispatch error: {}", e))?;
+                }
+
+                if state.failed {
+                    return Err("Screen capture failed".to_string());
+                }
+
+                Ok(())
+            })();
+
+            if let Err(e) = capture_status {
+                buffer.destroy();
+                shm_pool.destroy();
+                frame.destroy();
+                return Err(e);
+            }
+
+            let mmap = match unsafe { MmapMut::map_mut(&file) } {
+                Ok(mmap) => mmap,
+                Err(e) => {
+                    buffer.destroy();
+                    shm_pool.destroy();
+                    frame.destroy();
+                    return Err(format!("Failed to mmap: {}", e));
+                }
+            };
+            let data = mmap.to_vec();
+
+            // Pre-compute luminance and convert to BGRA
+            let pixel_count = (format.width * format.height) as usize;
+            let mut luminance = vec![0u8; pixel_count];
+            let mut bgra_data = vec![0u8; pixel_count * 4];
+
+            for y in 0..format.height {
+                for x in 0..format.width {
+                    let src_idx = (y * format.stride + x * 4) as usize;
+                    let dst_idx = (y * format.width + x) as usize;
+
+                    if src_idx + 3 < data.len() {
+                        let (r, g, b) = match format.format {
+                            wl_shm::Format::Argb8888 | wl_shm::Format::Xrgb8888 => {
+                                (data[src_idx + 2], data[src_idx + 1], data[src_idx])
+                            }
+                            wl_shm::Format::Xbgr8888 | wl_shm::Format::Abgr8888 => {
+                                (data[src_idx], data[src_idx + 1], data[src_idx + 2])
+                            }
+                            _ => (data[src_idx + 2], data[src_idx + 1], data[src_idx]),
+                        };
+
+                        luminance[dst_idx] =
+                            (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) as u8;
+
+                        let bgra_idx = dst_idx * 4;
+                        bgra_data[bgra_idx] = b;
+                        bgra_data[bgra_idx + 1] = g;
+                        bgra_data[bgra_idx + 2] = r;
+                        bgra_data[bgra_idx + 3] = 255;
+                    }
+                }
+            }
+
+            let (final_width, final_height, final_luminance, final_bgra) = apply_transform(
+                format.width,
+                format.height,
+                luminance,
+                bgra_data,
+                monitor.transform,
+            );
+
+            buffer.destroy();
+            shm_pool.destroy();
+            frame.destroy();
+
+            Ok(Screenshot {
+                bgra_data: final_bgra,
+                width: final_width,
+                height: final_height,
+                luminance: final_luminance,
+            })
+        })();
+
+        match capture_result {
+            Ok(screenshot) => monitor.screenshot = Some(screenshot),
+            Err(e) => eprintln!("warning: capture failed for {}: {}", monitor.name, e),
         }
     }
 
-    // Check if monitor is rotated
-    // transform values: 0 = normal, 1 = 90°, 2 = 180°, 3 = 270°
-    let (final_width, final_height, final_luminance, final_bgra) = match transform {
+    if monitors.iter().all(|m| m.screenshot.is_none()) {
+        return Err("Failed to capture any monitor".to_string());
+    }
+
+    Ok(MultiMonitorCapture { monitors })
+}
+
+fn apply_transform(
+    width: u32,
+    height: u32,
+    luminance: Vec<u8>,
+    bgra_data: Vec<u8>,
+    transform: u32,
+) -> (u32, u32, Vec<u8>, Vec<u8>) {
+    match transform {
         1 | 3 => {
-            // 90° or 270° - need to swap dimensions and rotate
-            let new_width = format.height;
-            let new_height = format.width;
+            let new_width = height;
+            let new_height = width;
             let new_pixel_count = (new_width * new_height) as usize;
             let mut rotated_luminance = vec![0u8; new_pixel_count];
             let mut rotated_bgra = vec![0u8; new_pixel_count * 4];
 
-            for y in 0..format.height {
-                for x in 0..format.width {
+            for y in 0..height {
+                for x in 0..width {
                     let (new_x, new_y) = if transform == 1 {
-                        // 90° clockwise: new_x = height - 1 - y, new_y = x
-                        (format.height - 1 - y, x)
+                        (height - 1 - y, x)
                     } else {
-                        // 270° clockwise: new_x = y, new_y = width - 1 - x
-                        (y, format.width - 1 - x)
+                        (y, width - 1 - x)
                     };
 
-                    let src_idx = (y * format.width + x) as usize;
+                    let src_idx = (y * width + x) as usize;
                     let dst_idx = (new_y * new_width + new_x) as usize;
 
                     rotated_luminance[dst_idx] = luminance[src_idx];
@@ -442,18 +543,17 @@ pub fn capture_screen(
             (new_width, new_height, rotated_luminance, rotated_bgra)
         }
         2 => {
-            // 180° - no dimension change, but need to flip both axes
-            let pixel_count = (format.width * format.height) as usize;
+            let pixel_count = (width * height) as usize;
             let mut rotated_luminance = vec![0u8; pixel_count];
             let mut rotated_bgra = vec![0u8; pixel_count * 4];
 
-            for y in 0..format.height {
-                for x in 0..format.width {
-                    let new_x = format.width - 1 - x;
-                    let new_y = format.height - 1 - y;
+            for y in 0..height {
+                for x in 0..width {
+                    let new_x = width - 1 - x;
+                    let new_y = height - 1 - y;
 
-                    let src_idx = (y * format.width + x) as usize;
-                    let dst_idx = (new_y * format.width + new_x) as usize;
+                    let src_idx = (y * width + x) as usize;
+                    let dst_idx = (new_y * width + new_x) as usize;
 
                     rotated_luminance[dst_idx] = luminance[src_idx];
 
@@ -466,19 +566,8 @@ pub fn capture_screen(
                 }
             }
 
-            (format.width, format.height, rotated_luminance, rotated_bgra)
+            (width, height, rotated_luminance, rotated_bgra)
         }
-        _ => (format.width, format.height, luminance, bgra_data),
-    };
-
-    buffer.destroy();
-    shm_pool.destroy();
-    frame.destroy();
-
-    Ok(Screenshot {
-        bgra_data: final_bgra,
-        width: final_width,
-        height: final_height,
-        luminance: final_luminance,
-    })
+        _ => (width, height, luminance, bgra_data),
+    }
 }

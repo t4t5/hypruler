@@ -129,15 +129,21 @@ pub fn find_edges(screenshot: &Screenshot, cursor_x: u32, cursor_y: u32) -> Edge
     }
 }
 
-/// Snap a vertical edge (left or right) to nearby content.
-pub fn snap_edge_x(
+/// Snap a vertical edge (left or right) to nearby content, skipping scanlines inside an ignored rectangle.
+pub fn snap_edge_x_ignoring_rect(
     screenshot: &Screenshot,
     x: u32,
     y_start: u32,
     y_end: u32,
     direction: i32,
+    ignored_rect: Option<(u32, u32, u32, u32)>,
 ) -> u32 {
     (y_start..=y_end)
+        .filter(|&y| {
+            ignored_rect
+                .map(|(_, top, _, bottom)| y < top || y > bottom)
+                .unwrap_or(true)
+        })
         .filter_map(|y| {
             scan_for_edge(
                 screenshot,
@@ -153,15 +159,21 @@ pub fn snap_edge_x(
         .unwrap_or(x)
 }
 
-/// Snap a horizontal edge (top or bottom) to nearby content.
-pub fn snap_edge_y(
+/// Snap a horizontal edge (top or bottom) to nearby content, skipping scanlines inside an ignored rectangle.
+pub fn snap_edge_y_ignoring_rect(
     screenshot: &Screenshot,
     x_start: u32,
     x_end: u32,
     y: u32,
     direction: i32,
+    ignored_rect: Option<(u32, u32, u32, u32)>,
 ) -> u32 {
     (x_start..=x_end)
+        .filter(|&x| {
+            ignored_rect
+                .map(|(left, _, right, _)| x < left || x > right)
+                .unwrap_or(true)
+        })
         .filter_map(|x| {
             scan_for_edge(
                 screenshot,
