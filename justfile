@@ -4,8 +4,14 @@ dev:
 build:
   cargo build --release
 
+build-debug:
+  cargo build --profile release-debug
+
 start:
   ./target/release/hypruler
+
+start-debug:
+  HYPRULER_DEBUG=1 ./target/release-debug/hypruler
 
 install:
   cargo install --path .

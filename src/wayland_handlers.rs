@@ -1,6 +1,8 @@
 use crate::capture::{MonitorInfo, MultiMonitorCapture};
 use crate::edge_detection::{find_edges, snap_edge_x_ignoring_rect, snap_edge_y_ignoring_rect};
-use crate::ui::{draw_crosshair, draw_measurements, draw_rectangle_measurement};
+use crate::fps::{FrameClock, debug_clock_if_enabled};
+use crate::ui::{draw_crosshair, draw_label, draw_measurements, draw_rectangle_measurement};
+use tiny_skia::Color;
 use std::process::Command;
 
 use smithay_client_toolkit::{
@@ -256,6 +258,9 @@ pub struct WaylandApp {
     drag_rect: Option<(i32, i32, i32, i32)>, // Global coordinates (x1, y1, x2, y2)
     is_dragging: bool,
 
+    // Debug FPS overlay (None unless HYPRULER_DEBUG=1 in a debug build)
+    debug_clock: Option<FrameClock>,
+
     // Control
     exit: bool,
 }
@@ -317,6 +322,7 @@ impl WaylandApp {
             drag_start: None,
             drag_rect: None,
             is_dragging: false,
+            debug_clock: debug_clock_if_enabled(),
             exit: false,
         };
 
@@ -548,6 +554,28 @@ impl WaylandApp {
                 );
                 draw_crosshair(pixmap, cursor_phys_x as f32, cursor_phys_y as f32);
             }
+        }
+
+        if let Some(clock) = self.debug_clock.as_mut() {
+            if let Some((dt_ms, inst_fps)) = clock.tick() {
+                eprintln!("[hypruler-debug] dt={dt_ms:.2}ms fps={inst_fps:.1}");
+            }
+            let fps = clock.fps();
+            let color = if fps >= 55.0 {
+                Color::from_rgba8(46, 204, 113, 255) // green
+            } else if fps >= 30.0 {
+                Color::from_rgba8(243, 156, 18, 255) // yellow/orange
+            } else {
+                Color::from_rgba8(231, 76, 60, 255) // red
+            };
+            draw_label(
+                pixmap,
+                &format!("FPS: {:.1}", fps),
+                80.0,
+                30.0,
+                self.font.as_ref(),
+                color,
+            );
         }
 
         // Composite overlay onto canvas
