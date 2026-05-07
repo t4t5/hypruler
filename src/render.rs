@@ -1,6 +1,6 @@
 use crate::capture::Screenshot;
 use crate::edge_detection::find_edges;
-use crate::ui::{draw_crosshair, draw_measurements, draw_rectangle_measurement};
+use crate::ui::{draw_crosshair, draw_label, draw_measurements, draw_rectangle_measurement};
 use tiny_skia::Pixmap;
 
 #[derive(Debug, Clone, Copy)]
@@ -11,6 +11,8 @@ pub struct FrameOverlay {
     pub drag_start: Option<(f64, f64)>,
     pub drag_rect: Option<(u32, u32, u32, u32)>,
     pub is_dragging: bool,
+    /// Smoothed frames-per-second to draw as a debug overlay. `None` disables it.
+    pub debug_fps: Option<f64>,
 }
 
 fn normalize_rect(x1: u32, y1: u32, x2: u32, y2: u32) -> (u32, u32, u32, u32) {
@@ -83,6 +85,10 @@ pub fn compose_frame(
             overlay.scale,
         );
         draw_crosshair(pixmap, cursor_phys_x as f32, cursor_phys_y as f32);
+    }
+
+    if let Some(fps) = overlay.debug_fps {
+        draw_label(pixmap, &format!("FPS: {fps:.1}"), 80.0, 30.0, font);
     }
 
     let overlay_data = pixmap.data();

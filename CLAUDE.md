@@ -71,6 +71,19 @@ just bench
 
 `src/lib.rs` exists primarily so the bench (and any future integration tests) can import crate modules; `main.rs` uses the same library entrypoints rather than redeclaring modules.
 
+### Debug FPS overlay
+
+To check performance in real Wayland environments, we can enable an FPS overlay with the `release-debug` Cargo profile and run with `HYPRULER_DEBUG=1`:
+
+```bash
+just build-debug
+just start-debug
+```
+
+A debug-profile build (`cargo run`) would be slow enough that FPS measurements wouldn't reflect real user experience; the `release-debug` profile keeps optimizations.
+
+A small "FPS: XX" label is drawn in the top-left of the overlay, and per-frame timings are logged to stderr in the form `[hypruler-debug] dt=14.20ms fps=70.4`. The overlay is gated on both `cfg!(debug_assertions)` and the env var, so production release builds carry zero overhead and have no codepath to trigger it. Implementation: `FrameClock` (EMA-smoothed) ticks once per `frame()` callback in `wayland_handlers.rs`; the smoothed value is threaded into `FrameOverlay::debug_fps` and rendered by `compose_frame`. FPS is bounded by the compositor's vsync rate, so the useful signal is *drops* below it (e.g. 60 → 22 during a 4K drag).
+
 ## Dependencies
 
 - `smithay-client-toolkit` - Wayland client library with layer-shell support

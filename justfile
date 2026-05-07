@@ -4,11 +4,17 @@ dev:
 build:
   cargo build --release
 
+build-debug:
+  cargo build --profile release-debug
+
 bench:
   cargo bench --bench draw -- --sample-size 10 --measurement-time 1 --warm-up-time 1
 
 start:
   ./target/release/hypruler
+
+start-debug:
+  HYPRULER_DEBUG=1 ./target/release-debug/hypruler
 
 install:
   cargo install --path .

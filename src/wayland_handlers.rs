@@ -2,6 +2,52 @@ use crate::capture::Screenshot;
 use crate::edge_detection::{snap_edge_x, snap_edge_y};
 use crate::render::{FrameOverlay, compose_frame};
 use std::process::Command;
+use std::time::Instant;
+
+/// EMA-smoothed FPS counter. Active only when `HYPRULER_DEBUG=1` in a debug build.
+struct FrameClock {
+    last: Option<Instant>,
+    smoothed_fps: f64,
+}
+
+impl FrameClock {
+    fn new() -> Self {
+        Self {
+            last: None,
+            smoothed_fps: 0.0,
+        }
+    }
+
+    /// Record a frame. Returns `(dt_ms, instantaneous_fps)` if a previous tick exists.
+    fn tick(&mut self) -> Option<(f64, f64)> {
+        let now = Instant::now();
+        let result = self.last.map(|prev| {
+            let dt_ms = now.duration_since(prev).as_secs_f64() * 1000.0;
+            let inst_fps = if dt_ms > 0.0 { 1000.0 / dt_ms } else { 0.0 };
+            let alpha = 0.1;
+            self.smoothed_fps = if self.smoothed_fps == 0.0 {
+                inst_fps
+            } else {
+                alpha * inst_fps + (1.0 - alpha) * self.smoothed_fps
+            };
+            (dt_ms, inst_fps)
+        });
+        self.last = Some(now);
+        result
+    }
+
+    fn fps(&self) -> f64 {
+        self.smoothed_fps
+    }
+}
+
+fn debug_clock_if_enabled() -> Option<FrameClock> {
+    if cfg!(debug_assertions) && std::env::var("HYPRULER_DEBUG").is_ok() {
+        Some(FrameClock::new())
+    } else {
+        None
+    }
+}
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -92,6 +138,9 @@ pub struct WaylandApp {
     drag_rect: Option<(u32, u32, u32, u32)>,
     is_dragging: bool,
 
+    // Debug FPS overlay (None unless HYPRULER_DEBUG=1 in a debug build)
+    debug_clock: Option<FrameClock>,
+
     // Control
     exit: bool,
 }
@@ -158,6 +207,7 @@ impl WaylandApp {
             drag_start: None,
             drag_rect: None,
             is_dragging: false,
+            debug_clock: debug_clock_if_enabled(),
             exit: false,
         };
 
@@ -241,6 +291,13 @@ impl WaylandApp {
             )
             .expect("Failed to create buffer");
 
+        let debug_fps = self.debug_clock.as_mut().map(|clock| {
+            if let Some((dt_ms, inst_fps)) = clock.tick() {
+                eprintln!("[hypruler-debug] dt={dt_ms:.2}ms fps={inst_fps:.1}");
+            }
+            clock.fps()
+        });
+
         compose_frame(
             canvas,
             &mut self.cached_pixmap,
@@ -252,6 +309,7 @@ impl WaylandApp {
                 drag_start: self.drag_start,
                 drag_rect: self.drag_rect,
                 is_dragging: self.is_dragging,
+                debug_fps,
             },
             self.font.as_ref(),
         )

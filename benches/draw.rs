@@ -31,6 +31,7 @@ fn bench_drag_frame(c: &mut Criterion) {
             drag_start: Some((width as f64 * 0.25, height as f64 * 0.35)),
             drag_rect: None,
             is_dragging: true,
+            debug_fps: None,
         };
 
         group.bench_with_input(

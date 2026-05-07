@@ -24,3 +24,9 @@ criterion = "0.5"
 [[bench]]
 name = "draw"
 harness = false
+
+# Release optimizations + debug_assertions, so HYPRULER_DEBUG=1 enables the FPS overlay
+# under realistic performance. Build with `cargo build --profile release-debug`.
+[profile.release-debug]
+inherits = "release"
+debug-assertions = true
