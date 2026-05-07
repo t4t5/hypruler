@@ -265,39 +265,23 @@ impl MultiMonitorCapture {
 }
 
 /// Get all monitor info from Hyprland
-#[derive(Deserialize)]
-struct HyprMonitorFull {
-    name: String,
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-    scale: f64,
-    transform: Option<u32>,
+#[derive(Deserialize, Debug, Clone)]
+pub struct HyprMonitorFull {
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub scale: f64,
+    pub transform: Option<u32>,
 }
 
-pub fn get_all_monitor_info() -> Option<Vec<(String, i32, i32, u32, u32, f64, u32)>> {
+pub fn get_all_monitor_info() -> Option<Vec<HyprMonitorFull>> {
     let output = Command::new("hyprctl")
         .args(["monitors", "-j"])
         .output()
         .ok()?;
-    let monitors: Vec<HyprMonitorFull> = serde_json::from_slice(&output.stdout).ok()?;
-    Some(
-        monitors
-            .into_iter()
-            .map(|m| {
-                (
-                    m.name,
-                    m.x,
-                    m.y,
-                    m.width,
-                    m.height,
-                    m.scale,
-                    m.transform.unwrap_or(0),
-                )
-            })
-            .collect(),
-    )
+    serde_json::from_slice(&output.stdout).ok()
 }
 
 /// Find all outputs and return their info
@@ -354,18 +338,18 @@ pub fn capture_all_monitors(conn: &Connection) -> Result<MultiMonitorCapture, St
 
     // Build monitor info structure
     let mut monitors = Vec::new();
-    for (name, x, y, width, height, scale, transform) in hypr_info {
+    for info in hypr_info {
         // Find the corresponding Wayland output
-        if let Some((_, output)) = outputs.iter().find(|(n, _)| n == &name).cloned() {
+        if let Some((_, output)) = outputs.iter().find(|(n, _)| n == &info.name).cloned() {
             monitors.push(MonitorInfo {
-                name,
+                name: info.name,
                 output,
-                x,
-                y,
-                width,
-                height,
-                scale,
-                transform,
+                x: info.x,
+                y: info.y,
+                width: info.width,
+                height: info.height,
+                scale: info.scale,
+                transform: info.transform.unwrap_or(0),
                 screenshot: None,
             });
         }
