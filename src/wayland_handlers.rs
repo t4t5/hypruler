@@ -68,6 +68,16 @@ fn get_hyprland_cursor_position() -> Option<(f64, f64)> {
     Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
 }
 
+/// Borrowed references to the shared Wayland globals needed to construct per-monitor surfaces.
+struct WaylandContext<'a> {
+    compositor_state: &'a CompositorState,
+    layer_shell: &'a LayerShell,
+    shm: &'a Shm,
+    qh: &'a QueueHandle<WaylandApp>,
+    fractional_scale_manager: &'a Option<WpFractionalScaleManagerV1>,
+    viewporter: &'a Option<WpViewporter>,
+}
+
 // Per-monitor surface state
 struct MonitorSurface {
     layer_surface: LayerSurface,
@@ -89,30 +99,27 @@ struct MonitorSurface {
 
 impl MonitorSurface {
     fn new(
-        compositor_state: &CompositorState,
-        layer_shell: &LayerShell,
-        shm: &Shm,
-        qh: &QueueHandle<WaylandApp>,
+        ctx: &WaylandContext,
         output: &wl_output::WlOutput,
-        fractional_scale_manager: &Option<WpFractionalScaleManagerV1>,
-        viewporter: &Option<WpViewporter>,
         monitor_info: &MonitorInfo,
         idx: usize,
     ) -> Self {
-        let surface = compositor_state.create_surface(qh);
+        let surface = ctx.compositor_state.create_surface(ctx.qh);
 
         // Set up fractional scaling if available (pass index as data)
-        let fractional_scale = fractional_scale_manager
+        let fractional_scale = ctx
+            .fractional_scale_manager
             .as_ref()
-            .map(|m| m.get_fractional_scale(&surface, qh, idx));
+            .map(|m| m.get_fractional_scale(&surface, ctx.qh, idx));
 
         // Set up viewport if available
-        let viewport = viewporter
+        let viewport = ctx
+            .viewporter
             .as_ref()
-            .map(|v| v.get_viewport(&surface, qh, ()));
+            .map(|v| v.get_viewport(&surface, ctx.qh, ()));
 
-        let layer_surface = layer_shell.create_layer_surface(
-            qh,
+        let layer_surface = ctx.layer_shell.create_layer_surface(
+            ctx.qh,
             surface,
             Layer::Overlay,
             Some("hypruler"),
@@ -138,7 +145,7 @@ impl MonitorSurface {
 
         // Initial pool size (will be resized on configure)
         let pool_size = (phys_width * phys_height * 4) as usize;
-        let pool = SlotPool::new(pool_size, shm).expect("Failed to create pool");
+        let pool = SlotPool::new(pool_size, ctx.shm).expect("Failed to create pool");
 
         Self {
             layer_surface,
@@ -338,6 +345,15 @@ impl WaylandApp {
             .map(|(idx, _)| idx)
             .collect();
 
+        let ctx = WaylandContext {
+            compositor_state: &self.compositor_state,
+            layer_shell: &self.layer_shell,
+            shm: &self.shm,
+            qh,
+            fractional_scale_manager: &self.fractional_scale_manager,
+            viewporter: &self.viewporter,
+        };
+
         // Create a surface for each monitor that has a screenshot.
         for monitor_idx in monitor_indices {
             let monitor = &self.monitors[monitor_idx];
@@ -352,17 +368,7 @@ impl WaylandApp {
 
             if let Some(ref output) = output {
                 let surface_idx = self.monitor_surfaces.len();
-                let surface = MonitorSurface::new(
-                    &self.compositor_state,
-                    &self.layer_shell,
-                    &self.shm,
-                    qh,
-                    output,
-                    &self.fractional_scale_manager,
-                    &self.viewporter,
-                    monitor,
-                    surface_idx,
-                );
+                let surface = MonitorSurface::new(&ctx, output, monitor, surface_idx);
                 self.monitor_surfaces.push(surface);
             }
         }
