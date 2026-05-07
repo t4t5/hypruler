@@ -17,15 +17,12 @@ A screen measurement tool for Hyprland/Sway (wlroots-based compositors), inspire
 ```
 src/
   main.rs            - Entry point (minimal - just connects and runs event loop)
-  lib.rs             - Library root, re-exports modules so benches/tests can use them
+  lib.rs             - Library root, re-exports modules so main.rs can use them via `use hypruler::...`
   wayland_handlers.rs - WaylandApp struct and Wayland protocol handlers; delegates per-frame drawing to render::compose_frame
-  render.rs          - Pure CPU composition (compose_frame) — no Wayland deps, decoupled for benching
+  render.rs          - Pure CPU composition (compose_frame), separated from Wayland I/O
   capture.rs         - Focused monitor detection (hyprctl) and screen capture (wlr-screencopy)
   edge_detection.rs  - Edge detection (luminance-based boundary finding)
   ui.rs              - Drawing with tiny-skia (lines, crosshair, labels, rectangles)
-
-tests/
-  alloc_budget.rs    - Per-frame allocation regression test (CI gate)
 ```
 
 - **Screen capture** at physical resolution (e.g., 2880x1920 for HiDPI)
@@ -58,31 +55,7 @@ cargo build --release
 
 ## Performance
 
-The per-frame composition runs on the drag hot path (every vsync) and dominates perceived lag, so we have two complementary tools to catch regressions:
-- an allocation budget check that can be run in CI
-- an FPS overlay so users can test end-to-end perceived performance in real environments
-
-The CPU composition is split out as a pure function `render::compose_frame(canvas, cached_pixmap, screenshot, overlay, font)` with no Wayland deps. `wayland_handlers` calls into it; tests can call it directly. `src/lib.rs` exists primarily so integration tests can import crate modules; `main.rs` uses the same library entrypoints rather than redeclaring modules.
-
-### Allocation-budget CI gate
-
-In order to prevent performance regression, we have a test that measures per-frame allocations (a deterministic, hardware-independent number) and asserts they stay under generous thresholds. Run locally:
-
-```bash
-just test-perf
-```
-
-How it works: an integration-test binary installs a `CountingAllocator` as `#[global_allocator]` that tracks bytes and allocation count.
-
-The test runs `compose_frame` in a 4K drag configuration 100 times, samples the counters before/after the loop (so test setup and warm-up don't pollute the measurement), and asserts both budgets.
-
-As of writing the steady-state cost is ~48 KiB / 51 allocs per frame; budgets are set at ~5× that.
-
-Tracks both axes because a bytes-only budget would miss death-by-many-small-allocations and a counts-only budget would miss a single 41 MB pixel-buffer clone — they cover different regression modes.
-
-`.github/workflows/perf.yml` runs this test on every PR.
-
-### Debug FPS overlay
+The per-frame composition runs on the drag hot path (every vsync) and dominates perceived lag. The CPU composition is split out as a pure function `render::compose_frame(canvas, cached_pixmap, screenshot, overlay, font)` with no Wayland deps; `wayland_handlers` calls into it.
 
 To check performance in real Wayland environments, we can enable an FPS overlay with the `release-debug` Cargo profile and run with `HYPRULER_DEBUG=1`:
 

@@ -7,9 +7,6 @@ build:
 build-debug:
   cargo build --profile release-debug
 
-test-perf:
-  cargo test --test alloc_budget --release -- --nocapture
-
 start:
   ./target/release/hypruler
 
