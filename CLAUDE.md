@@ -51,6 +51,18 @@ cargo build --release
 # Binary at target/release/hypruler
 ```
 
+## Development
+
+### FPS overlay
+
+For profiling frame timing, build with the `release-debug` profile and set `HYPRULER_DEBUG=1`:
+
+```bash
+just build-debug && just start-debug
+```
+
+This renders an on-screen FPS counter via `src/fps.rs` (EMA-smoothed). The overlay is gated by both `cfg!(debug_assertions)` and the env var, so release builds never include it.
+
 ## Dependencies
 
 - `smithay-client-toolkit` - Wayland client library with layer-shell support
