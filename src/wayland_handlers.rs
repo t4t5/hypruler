@@ -185,6 +185,22 @@ impl MonitorSurface {
         (local_x as u32, local_y as u32)
     }
 
+    fn intersects_global_rect(&self, x1: f64, y1: f64, x2: f64, y2: f64) -> bool {
+        let left = x1.min(x2);
+        let top = y1.min(y2);
+        let right = x1.max(x2);
+        let bottom = y1.max(y2);
+        let monitor_left = self.global_x as f64;
+        let monitor_top = self.global_y as f64;
+        let monitor_right = (self.global_x + self.width as i32) as f64;
+        let monitor_bottom = (self.global_y + self.height as i32) as f64;
+
+        right >= monitor_left
+            && left <= monitor_right
+            && bottom >= monitor_top
+            && top <= monitor_bottom
+    }
+
     /// Clip a global logical rectangle to this monitor and convert it to local physical coordinates.
     fn global_rect_to_local_physical(
         &self,
@@ -308,17 +324,19 @@ impl WaylandApp {
     }
 
     pub fn create_surfaces(&mut self, qh: &QueueHandle<Self>) -> Result<(), String> {
-        // Collect monitor info first
-        let monitors_to_create: Vec<_> = self
+        let monitor_indices: Vec<_> = self
             .monitors
             .iter()
-            .filter(|m| m.screenshot.is_some())
-            .cloned()
+            .enumerate()
+            .filter(|(_, monitor)| monitor.screenshot.is_some())
+            .map(|(idx, _)| idx)
             .collect();
 
-        // Create a surface for each monitor that has a screenshot
-        for (idx, monitor) in monitors_to_create.iter().enumerate() {
-            // Find the wl_output for this monitor
+        // Create a surface for each monitor that has a screenshot.
+        for monitor_idx in monitor_indices {
+            let monitor = &self.monitors[monitor_idx];
+
+            // Find the wl_output for this monitor.
             let output = self.output_state.outputs().find(|o| {
                 self.output_state
                     .info(o)
@@ -327,6 +345,7 @@ impl WaylandApp {
             });
 
             if let Some(ref output) = output {
+                let surface_idx = self.monitor_surfaces.len();
                 let surface = MonitorSurface::new(
                     &self.compositor_state,
                     &self.layer_shell,
@@ -336,7 +355,7 @@ impl WaylandApp {
                     &self.fractional_scale_manager,
                     &self.viewporter,
                     monitor,
-                    idx,
+                    surface_idx,
                 );
                 self.monitor_surfaces.push(surface);
             }
@@ -384,12 +403,12 @@ impl WaylandApp {
             }
         }
 
-        // Get the screenshot for this monitor first
-        let monitor_info = self.monitors.iter().find(|m| {
+        // Borrow the screenshot instead of cloning it on every redraw.
+        let monitor_info_idx = self.monitors.iter().position(|m| {
             m.x == self.monitor_surfaces[idx].global_x && m.y == self.monitor_surfaces[idx].global_y
         });
-        let screenshot = monitor_info.and_then(|m| m.screenshot.as_ref()).cloned();
-        let Some(screenshot) = screenshot else {
+        let Some(screenshot) = monitor_info_idx.and_then(|i| self.monitors[i].screenshot.as_ref())
+        else {
             return;
         };
 
@@ -518,7 +537,7 @@ impl WaylandApp {
                 && cursor_phys_x < screenshot.width
                 && cursor_phys_y < screenshot.height
             {
-                let edges = find_edges(&screenshot, cursor_phys_x, cursor_phys_y);
+                let edges = find_edges(screenshot, cursor_phys_x, cursor_phys_y);
                 draw_measurements(
                     pixmap,
                     &edges,
@@ -820,16 +839,30 @@ impl PointerHandler for WaylandApp {
                         self.monitor_surfaces[monitor_idx].needs_redraw = true;
                     }
 
-                    // When dragging, the rectangle can span multiple monitors, so redraw every surface.
+                    // When dragging, redraw only monitors touched by the previous or current drag rect.
                     // Otherwise only redraw the monitor where the cursor was and where it is now.
+                    let drag_start = self.drag_start;
                     let monitors_to_redraw: Vec<_> = self
                         .monitor_surfaces
                         .iter()
                         .enumerate()
                         .filter(|(_, m)| {
-                            self.is_dragging
-                                || (had_old_pointer && m.contains(old_x, old_y))
-                                || m.contains(self.pointer_x, self.pointer_y)
+                            if self.is_dragging {
+                                drag_start
+                                    .map(|(start_x, start_y)| {
+                                        m.intersects_global_rect(start_x, start_y, old_x, old_y)
+                                            || m.intersects_global_rect(
+                                                start_x,
+                                                start_y,
+                                                self.pointer_x,
+                                                self.pointer_y,
+                                            )
+                                    })
+                                    .unwrap_or(false)
+                            } else {
+                                (had_old_pointer && m.contains(old_x, old_y))
+                                    || m.contains(self.pointer_x, self.pointer_y)
+                            }
                         })
                         .map(|(i, _)| i)
                         .collect();
@@ -857,16 +890,19 @@ impl PointerHandler for WaylandApp {
                     self.update_pointer_from_hyprland();
 
                     // Start drag
+                    let had_drag_rect = self.drag_rect.is_some();
                     self.drag_start = Some((self.pointer_x, self.pointer_y));
                     self.is_dragging = true;
                     self.drag_rect = None;
 
-                    // Redraw all monitors because starting a new drag clears any completed rectangle.
+                    // Redraw all monitors only when clearing an existing rectangle; otherwise redraw the current monitor.
                     for monitor in &mut self.monitor_surfaces {
-                        monitor.needs_redraw = true;
-                        let surface = monitor.layer_surface.wl_surface().clone();
-                        monitor.layer_surface.wl_surface().frame(qh, surface);
-                        monitor.layer_surface.wl_surface().commit();
+                        if had_drag_rect || monitor.contains(self.pointer_x, self.pointer_y) {
+                            monitor.needs_redraw = true;
+                            let surface = monitor.layer_surface.wl_surface().clone();
+                            monitor.layer_surface.wl_surface().frame(qh, surface);
+                            monitor.layer_surface.wl_surface().commit();
+                        }
                     }
                 }
                 PointerEventKind::Release {
@@ -961,14 +997,52 @@ impl PointerHandler for WaylandApp {
                             self.drag_rect = None;
                         }
                     }
+                    let released_x = self.pointer_x;
+                    let released_y = self.pointer_y;
+                    let release_drag_start = self.drag_start;
+                    let final_drag_rect = self.drag_rect;
+                    self.drag_start = None;
                     self.is_dragging = false;
 
-                    // Redraw all monitors
-                    for monitor in &mut self.monitor_surfaces {
-                        monitor.needs_redraw = true;
-                        let surface = monitor.layer_surface.wl_surface().clone();
-                        monitor.layer_surface.wl_surface().frame(qh, surface);
-                        monitor.layer_surface.wl_surface().commit();
+                    // Redraw only monitors touched by the active/final rectangle, plus the cursor monitor.
+                    let monitors_to_redraw: Vec<_> = self
+                        .monitor_surfaces
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, monitor)| {
+                            monitor.contains(released_x, released_y)
+                                || release_drag_start
+                                    .map(|(start_x, start_y)| {
+                                        monitor.intersects_global_rect(
+                                            start_x, start_y, released_x, released_y,
+                                        )
+                                    })
+                                    .unwrap_or(false)
+                                || final_drag_rect
+                                    .map(|(x1, y1, x2, y2)| {
+                                        monitor.intersects_global_rect(
+                                            x1 as f64, y1 as f64, x2 as f64, y2 as f64,
+                                        )
+                                    })
+                                    .unwrap_or(false)
+                        })
+                        .map(|(idx, _)| idx)
+                        .collect();
+
+                    for idx in monitors_to_redraw {
+                        self.monitor_surfaces[idx].needs_redraw = true;
+                        let surface = self.monitor_surfaces[idx]
+                            .layer_surface
+                            .wl_surface()
+                            .clone();
+                        self.monitor_surfaces[idx]
+                            .layer_surface
+                            .wl_surface()
+                            .frame(qh, surface);
+                        self.monitor_surfaces[idx]
+                            .layer_surface
+                            .wl_surface()
+                            .commit();
                     }
                 }
                 _ => {}

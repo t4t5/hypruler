@@ -389,115 +389,127 @@ pub fn capture_all_monitors(conn: &Connection) -> Result<MultiMonitorCapture, St
         .bind(&qh, 1..=1, ())
         .map_err(|_| "wl_shm not available")?;
 
-    // Capture each monitor
+    // Capture each monitor. Keep running if an individual output fails, but report why.
     for monitor in &mut monitors {
-        let mut state = CaptureState::new();
-        let frame = screencopy_manager.capture_output(0, &monitor.output, &qh, ());
+        let capture_result = (|| -> Result<Screenshot, String> {
+            let mut state = CaptureState::new();
+            let frame = screencopy_manager.capture_output(0, &monitor.output, &qh, ());
 
-        while !state.done {
-            event_queue
-                .blocking_dispatch(&mut state)
-                .map_err(|e| format!("Dispatch error: {}", e))?;
-        }
-
-        let format = match state.format {
-            Some(f) => f,
-            None => continue, // Skip this monitor if format not available
-        };
-
-        let fd = create_shm_fd().map_err(|e| format!("Failed to create shm fd: {}", e))?;
-        let file = File::from(fd);
-        let size = (format.stride * format.height) as u64;
-        if file.set_len(size).is_err() {
-            continue;
-        }
-
-        let shm_pool = shm.create_pool(file.as_fd(), size as i32, &qh, ());
-        let buffer = shm_pool.create_buffer(
-            0,
-            format.width as i32,
-            format.height as i32,
-            format.stride as i32,
-            format.format,
-            &qh,
-            (),
-        );
-
-        frame.copy(&buffer);
-
-        while !state.ready && !state.failed {
-            if event_queue.blocking_dispatch(&mut state).is_err() {
-                break;
+            while !state.done {
+                event_queue
+                    .blocking_dispatch(&mut state)
+                    .map_err(|e| format!("Dispatch error: {}", e))?;
             }
-        }
 
-        if state.failed {
-            buffer.destroy();
-            shm_pool.destroy();
-            frame.destroy();
-            continue;
-        }
+            let format = state.format.ok_or("No suitable buffer format received")?;
+            let fd = create_shm_fd().map_err(|e| format!("Failed to create shm fd: {}", e))?;
+            let file = File::from(fd);
+            let size = (format.stride * format.height) as u64;
+            file.set_len(size)
+                .map_err(|e| format!("Failed to set file size: {}", e))?;
 
-        let Ok(mmap) = (unsafe { MmapMut::map_mut(&file) }) else {
-            buffer.destroy();
-            shm_pool.destroy();
-            frame.destroy();
-            continue;
-        };
-        let data = mmap.to_vec();
+            let shm_pool = shm.create_pool(file.as_fd(), size as i32, &qh, ());
+            let buffer = shm_pool.create_buffer(
+                0,
+                format.width as i32,
+                format.height as i32,
+                format.stride as i32,
+                format.format,
+                &qh,
+                (),
+            );
 
-        // Pre-compute luminance and convert to BGRA
-        let pixel_count = (format.width * format.height) as usize;
-        let mut luminance = vec![0u8; pixel_count];
-        let mut bgra_data = vec![0u8; pixel_count * 4];
+            frame.copy(&buffer);
 
-        for y in 0..format.height {
-            for x in 0..format.width {
-                let src_idx = (y * format.stride + x * 4) as usize;
-                let dst_idx = (y * format.width + x) as usize;
+            let capture_status = (|| -> Result<(), String> {
+                while !state.ready && !state.failed {
+                    event_queue
+                        .blocking_dispatch(&mut state)
+                        .map_err(|e| format!("Dispatch error: {}", e))?;
+                }
 
-                if src_idx + 3 < data.len() {
-                    let (r, g, b) = match format.format {
-                        wl_shm::Format::Argb8888 | wl_shm::Format::Xrgb8888 => {
-                            (data[src_idx + 2], data[src_idx + 1], data[src_idx])
-                        }
-                        wl_shm::Format::Xbgr8888 | wl_shm::Format::Abgr8888 => {
-                            (data[src_idx], data[src_idx + 1], data[src_idx + 2])
-                        }
-                        _ => (data[src_idx + 2], data[src_idx + 1], data[src_idx]),
-                    };
+                if state.failed {
+                    return Err("Screen capture failed".to_string());
+                }
 
-                    luminance[dst_idx] =
-                        (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) as u8;
+                Ok(())
+            })();
 
-                    let bgra_idx = dst_idx * 4;
-                    bgra_data[bgra_idx] = b;
-                    bgra_data[bgra_idx + 1] = g;
-                    bgra_data[bgra_idx + 2] = r;
-                    bgra_data[bgra_idx + 3] = 255;
+            if let Err(e) = capture_status {
+                buffer.destroy();
+                shm_pool.destroy();
+                frame.destroy();
+                return Err(e);
+            }
+
+            let mmap = match unsafe { MmapMut::map_mut(&file) } {
+                Ok(mmap) => mmap,
+                Err(e) => {
+                    buffer.destroy();
+                    shm_pool.destroy();
+                    frame.destroy();
+                    return Err(format!("Failed to mmap: {}", e));
+                }
+            };
+            let data = mmap.to_vec();
+
+            // Pre-compute luminance and convert to BGRA
+            let pixel_count = (format.width * format.height) as usize;
+            let mut luminance = vec![0u8; pixel_count];
+            let mut bgra_data = vec![0u8; pixel_count * 4];
+
+            for y in 0..format.height {
+                for x in 0..format.width {
+                    let src_idx = (y * format.stride + x * 4) as usize;
+                    let dst_idx = (y * format.width + x) as usize;
+
+                    if src_idx + 3 < data.len() {
+                        let (r, g, b) = match format.format {
+                            wl_shm::Format::Argb8888 | wl_shm::Format::Xrgb8888 => {
+                                (data[src_idx + 2], data[src_idx + 1], data[src_idx])
+                            }
+                            wl_shm::Format::Xbgr8888 | wl_shm::Format::Abgr8888 => {
+                                (data[src_idx], data[src_idx + 1], data[src_idx + 2])
+                            }
+                            _ => (data[src_idx + 2], data[src_idx + 1], data[src_idx]),
+                        };
+
+                        luminance[dst_idx] =
+                            (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) as u8;
+
+                        let bgra_idx = dst_idx * 4;
+                        bgra_data[bgra_idx] = b;
+                        bgra_data[bgra_idx + 1] = g;
+                        bgra_data[bgra_idx + 2] = r;
+                        bgra_data[bgra_idx + 3] = 255;
+                    }
                 }
             }
+
+            let (final_width, final_height, final_luminance, final_bgra) = apply_transform(
+                format.width,
+                format.height,
+                luminance,
+                bgra_data,
+                monitor.transform,
+            );
+
+            buffer.destroy();
+            shm_pool.destroy();
+            frame.destroy();
+
+            Ok(Screenshot {
+                bgra_data: final_bgra,
+                width: final_width,
+                height: final_height,
+                luminance: final_luminance,
+            })
+        })();
+
+        match capture_result {
+            Ok(screenshot) => monitor.screenshot = Some(screenshot),
+            Err(e) => eprintln!("warning: capture failed for {}: {}", monitor.name, e),
         }
-
-        // Apply transform
-        let (final_width, final_height, final_luminance, final_bgra) = apply_transform(
-            format.width,
-            format.height,
-            luminance,
-            bgra_data,
-            monitor.transform,
-        );
-
-        monitor.screenshot = Some(Screenshot {
-            bgra_data: final_bgra,
-            width: final_width,
-            height: final_height,
-            luminance: final_luminance,
-        });
-
-        buffer.destroy();
-        shm_pool.destroy();
-        frame.destroy();
     }
 
     if monitors.iter().all(|m| m.screenshot.is_none()) {
