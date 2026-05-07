@@ -26,6 +26,9 @@ src/
 
 benches/
   draw.rs            - Criterion bench for compose_frame at 1080p and 4K
+
+tests/
+  alloc_budget.rs    - Per-frame allocation regression test (CI gate)
 ```
 
 - **Screen capture** at physical resolution (e.g., 2880x1920 for HiDPI)
@@ -64,10 +67,21 @@ Run with:
 
 ```bash
 just bench
-# wraps: cargo bench --bench draw
 ```
 
 `benches/draw.rs` builds synthetic 1080p and 4K screenshots, calls `compose_frame` in a drag-state configuration, and uses Criterion to detect statistical regressions across runs. Add new bench cases here when changing the rendering path; aim to keep `compose_frame` allocation-free on steady state (the cached `Pixmap` is reused, the canvas is borrowed).
+
+### Allocation-budget CI gate
+
+In order to prevent performance regression, we have a test that measures per-frame allocations (a deterministic, hardware-independent number) and asserts they stay under generous thresholds. Run locally:
+
+```bash
+just test-perf   # cargo test --test alloc_budget --release
+```
+
+How it works: an integration-test binary installs a `CountingAllocator` as `#[global_allocator]` that tracks bytes and allocation count. The test runs `compose_frame` in a 4K drag configuration 100 times, samples the counters before/after the loop (so test setup and warm-up don't pollute the measurement), and asserts both budgets. As of writing the steady-state cost is ~48 KiB / 51 allocs per frame; budgets are set at ~5× that. Tracks both axes because a bytes-only budget would miss death-by-many-small-allocations and a counts-only budget would miss a single 41 MB pixel-buffer clone — they cover different regression modes.
+
+`.github/workflows/perf.yml` runs this test on every PR. A failure points at exactly the kind of regression that surfaced in the multi-monitor PR review (a `Screenshot::clone()` per frame inside `draw_monitor`). Tighten the budgets if you intentionally reduce per-frame allocations; loosen them only with a clear reason in the commit message.
 
 `src/lib.rs` exists primarily so the bench (and any future integration tests) can import crate modules; `main.rs` uses the same library entrypoints rather than redeclaring modules.
 

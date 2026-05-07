@@ -10,6 +10,9 @@ build-debug:
 bench:
   cargo bench --bench draw -- --sample-size 10 --measurement-time 1 --warm-up-time 1
 
+test-perf:
+  cargo test --test alloc_budget --release -- --nocapture
+
 start:
   ./target/release/hypruler
 

@@ -1,0 +1,28 @@
+name: Performance
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  alloc-budget:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Pass/fail gate: catches accidental pixel-buffer churn in compose_frame
+      # (e.g. a Vec clone slipping into the inner loop). Hardware-independent —
+      # measures bytes/allocs, not wall-clock — so it doesn't suffer from CI runner noise.
+      - name: Run allocation-budget regression test
+        run: cargo test --test alloc_budget --release -- --nocapture
