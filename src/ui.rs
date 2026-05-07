@@ -41,6 +41,10 @@ fn label_bg_color() -> Color {
     Color::from_rgba8(40, 40, 40, 230)
 }
 
+pub fn text_color_white() -> Color {
+    Color::from_rgba8(255, 255, 255, 255)
+}
+
 fn stroke_line(
     pixmap: &mut Pixmap,
     paint: &Paint,
@@ -103,6 +107,7 @@ pub fn draw_measurements(
         lx,
         ly,
         font,
+        text_color_white(),
     );
 }
 
@@ -180,7 +185,14 @@ pub fn draw_rectangle_measurement(
         };
         (center_x, y)
     };
-    draw_label(pixmap, &format!("{} x {}", width, height), lx, ly, font);
+    draw_label(
+        pixmap,
+        &format!("{} x {}", width, height),
+        lx,
+        ly,
+        font,
+        text_color_white(),
+    );
 }
 
 fn draw_end_cap(
@@ -257,21 +269,36 @@ fn draw_rounded_rect(pixmap: &mut Pixmap, x: f32, y: f32, width: f32, height: f3
     }
 }
 
-fn blend_pixel(pixel: &PremultipliedColorU8, alpha: f32) -> Option<PremultipliedColorU8> {
+fn blend_pixel(
+    pixel: &PremultipliedColorU8,
+    alpha: f32,
+    text_rgb: (u8, u8, u8),
+) -> Option<PremultipliedColorU8> {
     let inv_a = 1.0 - alpha;
     let max_val = pixel.alpha() as f32;
+    let (tr, tg, tb) = text_rgb;
     PremultipliedColorU8::from_rgba(
-        ((inv_a * pixel.red() as f32 + alpha * 255.0).min(max_val)) as u8,
-        ((inv_a * pixel.green() as f32 + alpha * 255.0).min(max_val)) as u8,
-        ((inv_a * pixel.blue() as f32 + alpha * 255.0).min(max_val)) as u8,
+        ((inv_a * pixel.red() as f32 + alpha * tr as f32).min(max_val)) as u8,
+        ((inv_a * pixel.green() as f32 + alpha * tg as f32).min(max_val)) as u8,
+        ((inv_a * pixel.blue() as f32 + alpha * tb as f32).min(max_val)) as u8,
         (inv_a * pixel.alpha() as f32 + alpha * 255.0) as u8,
     )
 }
 
-fn draw_text(pixmap: &mut Pixmap, font: &fontdue::Font, text: &str, start_x: f32, baseline_y: f32) {
+fn draw_text(
+    pixmap: &mut Pixmap,
+    font: &fontdue::Font,
+    text: &str,
+    start_x: f32,
+    baseline_y: f32,
+    color: Color,
+) {
     let (width, height) = (pixmap.width() as i32, pixmap.height() as i32);
     let stride = width as usize;
     let pixels = pixmap.pixels_mut();
+
+    let c8 = color.to_color_u8();
+    let text_rgb = (c8.red(), c8.green(), c8.blue());
 
     let mut cursor_x = start_x;
     for c in text.chars() {
@@ -292,7 +319,7 @@ fn draw_text(pixmap: &mut Pixmap, font: &fontdue::Font, text: &str, start_x: f32
                 }
 
                 let idx = draw_y as usize * stride + draw_x as usize;
-                if let Some(new_pixel) = blend_pixel(&pixels[idx], alpha as f32 / 255.0) {
+                if let Some(new_pixel) = blend_pixel(&pixels[idx], alpha as f32 / 255.0, text_rgb) {
                     pixels[idx] = new_pixel;
                 }
             }
@@ -307,6 +334,7 @@ pub(crate) fn draw_label(
     x: f32,
     y: f32,
     font: Option<&fontdue::Font>,
+    text_color: Color,
 ) {
     let mut text_width = 0.0;
     if let Some(font) = font {
@@ -332,6 +360,6 @@ pub(crate) fn draw_label(
     if let Some(font) = font {
         let text_x = label_x + LABEL_PADDING.0;
         let baseline_y = label_y + LABEL_PADDING.1 + FONT_SIZE * 0.8;
-        draw_text(pixmap, font, text, text_x, baseline_y);
+        draw_text(pixmap, font, text, text_x, baseline_y, text_color);
     }
 }

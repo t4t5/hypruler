@@ -2,6 +2,7 @@ use crate::capture::Screenshot;
 use crate::edge_detection::{find_edges, snap_edge_x, snap_edge_y};
 use crate::fps::{FrameClock, debug_clock_if_enabled};
 use crate::ui::{draw_crosshair, draw_label, draw_measurements, draw_rectangle_measurement};
+use tiny_skia::Color;
 use std::process::Command;
 
 use smithay_client_toolkit::{
@@ -310,12 +311,21 @@ impl WaylandApp {
             if let Some((dt_ms, inst_fps)) = clock.tick() {
                 eprintln!("[hypruler-debug] dt={dt_ms:.2}ms fps={inst_fps:.1}");
             }
+            let fps = clock.fps();
+            let color = if fps >= 55.0 {
+                Color::from_rgba8(46, 204, 113, 255) // green
+            } else if fps >= 30.0 {
+                Color::from_rgba8(243, 156, 18, 255) // yellow/orange
+            } else {
+                Color::from_rgba8(231, 76, 60, 255) // red
+            };
             draw_label(
                 pixmap,
-                &format!("FPS: {:.1}", clock.fps()),
+                &format!("FPS: {:.1}", fps),
                 80.0,
                 30.0,
                 self.font.as_ref(),
+                color,
             );
         }
 
