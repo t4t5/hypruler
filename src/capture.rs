@@ -219,7 +219,7 @@ fn create_shm_fd() -> std::io::Result<OwnedFd> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Screenshot {
     bgra_data: Vec<u8>,
     pub width: u32,
@@ -241,7 +241,7 @@ impl Screenshot {
 }
 
 /// Information about a monitor including its screenshot
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MonitorInfo {
     pub name: String,
     pub output: wl_output::WlOutput,
@@ -255,7 +255,7 @@ pub struct MonitorInfo {
 }
 
 /// All monitors with their screenshots
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MultiMonitorCapture {
     pub monitors: Vec<MonitorInfo>,
 }
