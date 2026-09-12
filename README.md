@@ -1,7 +1,7 @@
 <h1 align="center">hypruler</h1>
 
 <p align="center">
-  📏 Measure anything on your screen. Built for Linux + Hyprland.
+  📏 Measure anything on your screen. Built for Linux and compatible Wayland compositors.
 </p>
 
 <p align="center">
@@ -51,8 +51,13 @@ bindd = SUPER, M, hypruler, exec, hypruler
 
 ## Requirements
 
-- wlroots-based compositor (Hyprland, Sway, etc.)
-- `wlr-screencopy-unstable-v1` protocol support
+Hypruler supports Wayland compositors that expose the required protocols:
+
+- `wlr-screencopy-unstable-v1`
+- `xdg-output-unstable-v1`
+- `wlr-layer-shell-unstable-v1`
+
+Tested on Hyprland and Umbriel. Other compatible Wayland compositors are expected to work when they provide all of these protocols; compositor-specific commands are not required at runtime.
 
 ## Acknowledgments
 

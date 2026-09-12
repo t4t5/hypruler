@@ -1,10 +1,9 @@
 use memmap2::MmapMut;
 use rustix::fs::{self, SealFlags};
-use serde::Deserialize;
+use smithay_client_toolkit::output::OutputState;
 use std::ffi::CString;
 use std::fs::File;
 use std::os::fd::{AsFd, OwnedFd};
-use std::process::Command;
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle,
     globals::{GlobalListContents, registry_queue_init},
@@ -23,17 +22,6 @@ struct FrameFormat {
     stride: u32,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct OutputInfo {
-    pub name: Option<String>,
-    pub output: Option<wl_output::WlOutput>,
-    done: bool,
-}
-
-struct OutputEnumState {
-    outputs: Vec<OutputInfo>,
-}
-
 struct CaptureState {
     format: Option<FrameFormat>,
     done: bool,
@@ -48,47 +36,6 @@ impl CaptureState {
             done: false,
             ready: false,
             failed: false,
-        }
-    }
-}
-
-// Dispatch implementations for output enumeration
-impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for OutputEnumState {
-    fn event(
-        _state: &mut Self,
-        _proxy: &wl_registry::WlRegistry,
-        _event: wl_registry::Event,
-        _data: &GlobalListContents,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<wl_output::WlOutput, usize> for OutputEnumState {
-    fn event(
-        state: &mut Self,
-        proxy: &wl_output::WlOutput,
-        event: wl_output::Event,
-        data: &usize,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-        let idx = *data;
-        if idx >= state.outputs.len() {
-            return;
-        }
-        let info = &mut state.outputs[idx];
-
-        match event {
-            wl_output::Event::Name { name } => {
-                info.name = Some(name);
-                info.output = Some(proxy.clone());
-            }
-            wl_output::Event::Done => {
-                info.done = true;
-            }
-            _ => {}
         }
     }
 }
@@ -191,18 +138,6 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for CaptureState {
     }
 }
 
-impl Dispatch<wl_output::WlOutput, ()> for CaptureState {
-    fn event(
-        _state: &mut Self,
-        _proxy: &wl_output::WlOutput,
-        _event: wl_output::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-    }
-}
-
 fn create_shm_fd() -> std::io::Result<OwnedFd> {
     loop {
         match fs::memfd_create(
@@ -264,96 +199,143 @@ impl MultiMonitorCapture {
     // Methods can be added here as needed
 }
 
-/// Get all monitor info from Hyprland
-#[derive(Deserialize, Debug, Clone)]
-pub struct HyprMonitorFull {
+/// Output geometry and properties reported by xdg-output.
+#[derive(Debug, Clone)]
+pub struct OutputMetadata {
     pub name: String,
     pub x: i32,
     pub y: i32,
     pub width: u32,
     pub height: u32,
     pub scale: f64,
-    pub transform: Option<u32>,
+    pub transform: u32,
 }
 
-pub fn get_all_monitor_info() -> Option<Vec<HyprMonitorFull>> {
-    let output = Command::new("hyprctl")
-        .args(["monitors", "-j"])
-        .output()
-        .ok()?;
-    serde_json::from_slice(&output.stdout).ok()
+fn output_is_rotated(transform: u32) -> bool {
+    matches!(transform, 1 | 3 | 5 | 7)
 }
 
-/// Find all outputs and return their info
-fn find_all_outputs(conn: &Connection) -> Result<Vec<(String, wl_output::WlOutput)>, String> {
-    let (globals, mut event_queue) = registry_queue_init::<OutputEnumState>(conn)
-        .map_err(|e| format!("Failed to init registry: {}", e))?;
-
-    let qh = event_queue.handle();
-    let output_globals: Vec<_> = globals
-        .contents()
-        .clone_list()
-        .into_iter()
-        .filter(|g| g.interface == "wl_output")
-        .collect();
-
-    if output_globals.is_empty() {
-        return Err("No outputs available".to_string());
-    }
-
-    let mut state = OutputEnumState {
-        outputs: vec![OutputInfo::default(); output_globals.len()],
-    };
-
-    // Bind all outputs
-    for (idx, global) in output_globals.iter().enumerate() {
-        let output: wl_output::WlOutput =
-            globals
-                .registry()
-                .bind(global.name, global.version.min(4), &qh, idx);
-        state.outputs[idx].output = Some(output);
-    }
-
-    // Wait for all outputs to report their info
-    while !state.outputs.iter().all(|o| o.done) {
-        event_queue
-            .blocking_dispatch(&mut state)
-            .map_err(|e| format!("Dispatch error: {}", e))?;
-    }
-
-    Ok(state
-        .outputs
-        .into_iter()
-        .filter_map(|o| o.name.zip(o.output))
-        .collect())
-}
-
-/// Capture all monitors and return MultiMonitorCapture
-pub fn capture_all_monitors(conn: &Connection) -> Result<MultiMonitorCapture, String> {
-    // Get monitor info from Hyprland
-    let hypr_info = get_all_monitor_info().ok_or("Failed to get monitor info from Hyprland")?;
-
-    // Find all Wayland outputs
-    let outputs = find_all_outputs(conn)?;
-
-    // Build monitor info structure
-    let mut monitors = Vec::new();
-    for info in hypr_info {
-        // Find the corresponding Wayland output
-        if let Some((_, output)) = outputs.iter().find(|(n, _)| n == &info.name).cloned() {
-            monitors.push(MonitorInfo {
-                name: info.name,
-                output,
-                x: info.x,
-                y: info.y,
-                width: info.width,
-                height: info.height,
-                scale: info.scale,
-                transform: info.transform.unwrap_or(0),
-                screenshot: None,
-            });
+fn output_scale_hint(
+    info: &smithay_client_toolkit::output::OutputInfo,
+    width: u32,
+    height: u32,
+    transform: u32,
+) -> f64 {
+    if let Some(mode) = info.modes.iter().find(|mode| mode.current) {
+        let (physical_width, physical_height) = mode.dimensions;
+        if physical_width > 0 && physical_height > 0 {
+            let (physical_width, physical_height) = if output_is_rotated(transform) {
+                (physical_height, physical_width)
+            } else {
+                (physical_width, physical_height)
+            };
+            let scale_x = physical_width as f64 / width as f64;
+            let scale_y = physical_height as f64 / height as f64;
+            if scale_x > 0.0 && (scale_x - scale_y).abs() < 0.01 {
+                return (scale_x + scale_y) / 2.0;
+            }
         }
     }
+
+    info.scale_factor.max(1) as f64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_transform, output_is_rotated};
+
+    #[test]
+    fn recognizes_rotated_output_transforms() {
+        assert!(output_is_rotated(1));
+        assert!(output_is_rotated(3));
+        assert!(output_is_rotated(5));
+        assert!(output_is_rotated(7));
+        assert!(!output_is_rotated(0));
+        assert!(!output_is_rotated(2));
+        assert!(!output_is_rotated(4));
+        assert!(!output_is_rotated(6));
+    }
+
+    #[test]
+    fn transforms_flipped_rotations() {
+        for transform in [5, 7] {
+            let (width, height, luminance, bgra) =
+                apply_transform(2, 3, vec![0; 6], vec![0; 24], transform);
+            assert_eq!((width, height), (3, 2));
+            assert_eq!(luminance.len(), 6);
+            assert_eq!(bgra.len(), 24);
+        }
+    }
+}
+
+/// Read enabled output geometry from SCTK's xdg-output-backed `OutputState`.
+fn discover_outputs(
+    output_state: &OutputState,
+) -> Result<Vec<(OutputMetadata, wl_output::WlOutput)>, String> {
+    let mut discovered = Vec::new();
+
+    for (index, output) in output_state.outputs().enumerate() {
+        let info = output_state
+            .info(&output)
+            .ok_or("Output information is not available yet")?;
+        let name = info
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("output-{index}"));
+        let (x, y) = info
+            .logical_position
+            .ok_or_else(|| format!("Output {name} did not provide a logical position"))?;
+        let (width, height) = info
+            .logical_size
+            .ok_or_else(|| format!("Output {name} did not provide a logical size"))?;
+        if width <= 0 || height <= 0 {
+            return Err(format!("Output {name} has an invalid logical size"));
+        }
+        let transform = info.transform as u32;
+
+        discovered.push((
+            OutputMetadata {
+                name,
+                x,
+                y,
+                width: width as u32,
+                height: height as u32,
+                scale: output_scale_hint(&info, width as u32, height as u32, transform),
+                transform,
+            },
+            output,
+        ));
+    }
+
+    if discovered.is_empty() {
+        return Err("No outputs were reported by xdg-output".to_string());
+    }
+
+    Ok(discovered)
+}
+
+/// Capture all monitors and return MultiMonitorCapture.
+pub fn capture_all_monitors(
+    conn: &Connection,
+    output_state: &OutputState,
+) -> Result<MultiMonitorCapture, String> {
+    let outputs = discover_outputs(output_state)?;
+
+    // Build monitor info structure from compositor-independent output metadata.
+    let mut monitors = outputs
+        .into_iter()
+        .map(|(info, output)| MonitorInfo {
+            name: info.name,
+            output,
+            x: info.x,
+            y: info.y,
+            width: info.width,
+            height: info.height,
+            scale: info.scale,
+            transform: info.transform,
+            screenshot: None,
+        })
+        .collect::<Vec<_>>();
 
     if monitors.is_empty() {
         return Err("No monitors found".to_string());
@@ -367,7 +349,7 @@ pub fn capture_all_monitors(conn: &Connection) -> Result<MultiMonitorCapture, St
 
     let screencopy_manager: ZwlrScreencopyManagerV1 = globals
         .bind(&qh, 3..=3, ())
-        .map_err(|_| "wlr-screencopy protocol not available. Is your compositor wlroots-based?")?;
+        .map_err(|_| "wlr-screencopy-unstable-v1 protocol is not available")?;
 
     let shm: wl_shm::WlShm = globals
         .bind(&qh, 1..=1, ())
@@ -510,64 +492,43 @@ fn apply_transform(
     bgra_data: Vec<u8>,
     transform: u32,
 ) -> (u32, u32, Vec<u8>, Vec<u8>) {
-    match transform {
-        1 | 3 => {
-            let new_width = height;
-            let new_height = width;
-            let new_pixel_count = (new_width * new_height) as usize;
-            let mut rotated_luminance = vec![0u8; new_pixel_count];
-            let mut rotated_bgra = vec![0u8; new_pixel_count * 4];
+    let (new_width, new_height) = match transform {
+        1 | 3 | 5 | 7 => (height, width),
+        2 | 4 | 6 => (width, height),
+        _ => return (width, height, luminance, bgra_data),
+    };
+    let new_pixel_count = (new_width * new_height) as usize;
+    let mut transformed_luminance = vec![0u8; new_pixel_count];
+    let mut transformed_bgra = vec![0u8; new_pixel_count * 4];
 
-            for y in 0..height {
-                for x in 0..width {
-                    let (new_x, new_y) = if transform == 1 {
-                        (height - 1 - y, x)
-                    } else {
-                        (y, width - 1 - x)
-                    };
+    for y in 0..height {
+        for x in 0..width {
+            let (new_x, new_y) = match transform {
+                1 => (height - 1 - y, x),
+                2 => (width - 1 - x, height - 1 - y),
+                3 => (y, width - 1 - x),
+                4 => (width - 1 - x, y),
+                5 => (height - 1 - y, width - 1 - x),
+                6 => (x, height - 1 - y),
+                7 => (y, x),
+                _ => unreachable!(),
+            };
 
-                    let src_idx = (y * width + x) as usize;
-                    let dst_idx = (new_y * new_width + new_x) as usize;
+            let src_idx = (y * width + x) as usize;
+            let dst_idx = (new_y * new_width + new_x) as usize;
+            transformed_luminance[dst_idx] = luminance[src_idx];
 
-                    rotated_luminance[dst_idx] = luminance[src_idx];
-
-                    let src_bgra = src_idx * 4;
-                    let dst_bgra = dst_idx * 4;
-                    rotated_bgra[dst_bgra] = bgra_data[src_bgra];
-                    rotated_bgra[dst_bgra + 1] = bgra_data[src_bgra + 1];
-                    rotated_bgra[dst_bgra + 2] = bgra_data[src_bgra + 2];
-                    rotated_bgra[dst_bgra + 3] = bgra_data[src_bgra + 3];
-                }
-            }
-
-            (new_width, new_height, rotated_luminance, rotated_bgra)
+            let src_bgra = src_idx * 4;
+            let dst_bgra = dst_idx * 4;
+            transformed_bgra[dst_bgra..dst_bgra + 4]
+                .copy_from_slice(&bgra_data[src_bgra..src_bgra + 4]);
         }
-        2 => {
-            let pixel_count = (width * height) as usize;
-            let mut rotated_luminance = vec![0u8; pixel_count];
-            let mut rotated_bgra = vec![0u8; pixel_count * 4];
-
-            for y in 0..height {
-                for x in 0..width {
-                    let new_x = width - 1 - x;
-                    let new_y = height - 1 - y;
-
-                    let src_idx = (y * width + x) as usize;
-                    let dst_idx = (new_y * width + new_x) as usize;
-
-                    rotated_luminance[dst_idx] = luminance[src_idx];
-
-                    let src_bgra = src_idx * 4;
-                    let dst_bgra = dst_idx * 4;
-                    rotated_bgra[dst_bgra] = bgra_data[src_bgra];
-                    rotated_bgra[dst_bgra + 1] = bgra_data[src_bgra + 1];
-                    rotated_bgra[dst_bgra + 2] = bgra_data[src_bgra + 2];
-                    rotated_bgra[dst_bgra + 3] = bgra_data[src_bgra + 3];
-                }
-            }
-
-            (width, height, rotated_luminance, rotated_bgra)
-        }
-        _ => (width, height, luminance, bgra_data),
     }
+
+    (
+        new_width,
+        new_height,
+        transformed_luminance,
+        transformed_bgra,
+    )
 }

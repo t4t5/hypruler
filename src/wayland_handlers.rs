@@ -2,8 +2,8 @@ use crate::capture::{MonitorInfo, MultiMonitorCapture};
 use crate::edge_detection::{find_edges, snap_edge_x_ignoring_rect, snap_edge_y_ignoring_rect};
 use crate::fps::{FrameClock, debug_clock_if_enabled};
 use crate::ui::{draw_crosshair, draw_label, draw_measurements, draw_rectangle_measurement};
-use tiny_skia::Color;
 use std::process::Command;
+use tiny_skia::Color;
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -55,17 +55,6 @@ fn find_system_font() -> Option<Vec<u8>> {
         .ok()?;
     let path = String::from_utf8(output.stdout).ok()?;
     std::fs::read(path.trim()).ok()
-}
-
-fn get_hyprland_cursor_position() -> Option<(f64, f64)> {
-    let output = Command::new("hyprctl").arg("cursorpos").output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    let (x, y) = stdout.trim().split_once(',')?;
-    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
 }
 
 /// Shared Wayland globals borrowed by `MonitorSurface::new` to construct per-monitor surfaces.
@@ -276,6 +265,32 @@ fn normalize_rect(x1: u32, y1: u32, x2: u32, y2: u32) -> (u32, u32, u32, u32) {
     (x1.min(x2), y1.min(y2), x1.max(x2), y1.max(y2))
 }
 
+/// Return inclusive dimensions for a rectangle in global logical coordinates.
+fn logical_rect_size(x1: f64, y1: f64, x2: f64, y2: f64) -> (u32, u32) {
+    (
+        (x2 - x1).abs().round() as u32 + 1,
+        (y2 - y1).abs().round() as u32 + 1,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::logical_rect_size;
+
+    #[test]
+    fn logical_rect_size_is_direction_independent() {
+        assert_eq!(logical_rect_size(100.0, 100.0, 300.0, 200.0), (201, 101));
+        assert_eq!(logical_rect_size(300.0, 200.0, 100.0, 100.0), (201, 101));
+    }
+
+    #[test]
+    fn logical_rect_size_handles_negative_coordinates() {
+        assert_eq!(logical_rect_size(-500.0, 100.0, 500.0, 200.0), (1001, 101));
+        assert_eq!(logical_rect_size(500.0, 200.0, -500.0, 100.0), (1001, 101));
+        assert_eq!(logical_rect_size(-10.0, -20.0, 10.0, 30.0), (21, 51));
+    }
+}
+
 fn cursor_ignore_rect(x: u32, y: u32, width: u32, height: u32) -> (u32, u32, u32, u32) {
     (
         x.saturating_sub(CURSOR_SNAP_IGNORE_RADIUS),
@@ -286,7 +301,7 @@ fn cursor_ignore_rect(x: u32, y: u32, width: u32, height: u32) -> (u32, u32, u32
 }
 
 impl WaylandApp {
-    pub fn new(conn: &Connection, multi_capture: MultiMonitorCapture) -> (Self, EventQueue<Self>) {
+    pub fn new(conn: &Connection) -> (Self, EventQueue<Self>) {
         let (globals, event_queue) = registry_queue_init(conn).expect("Failed to init registry");
         let qh = event_queue.handle();
 
@@ -307,8 +322,6 @@ impl WaylandApp {
             fontdue::Font::from_bytes(data, fontdue::FontSettings::default()).ok()
         });
 
-        let monitors = multi_capture.monitors;
-
         let app = Self {
             registry_state,
             seat_state,
@@ -317,7 +330,7 @@ impl WaylandApp {
             shm,
             layer_shell,
             monitor_surfaces: Vec::new(),
-            monitors,
+            monitors: Vec::new(),
             fractional_scale_manager,
             viewporter,
             cursor_shape_manager,
@@ -334,6 +347,14 @@ impl WaylandApp {
         };
 
         (app, event_queue)
+    }
+
+    pub fn output_state(&self) -> &OutputState {
+        &self.output_state
+    }
+
+    pub fn set_capture(&mut self, multi_capture: MultiMonitorCapture) {
+        self.monitors = multi_capture.monitors;
     }
 
     pub fn create_surfaces(&mut self, qh: &QueueHandle<Self>) -> Result<(), String> {
@@ -358,19 +379,9 @@ impl WaylandApp {
         for monitor_idx in monitor_indices {
             let monitor = &self.monitors[monitor_idx];
 
-            // Find the wl_output for this monitor.
-            let output = self.output_state.outputs().find(|o| {
-                self.output_state
-                    .info(o)
-                    .map(|i| i.name.as_deref() == Some(&monitor.name))
-                    .unwrap_or(false)
-            });
-
-            if let Some(ref output) = output {
-                let surface_idx = self.monitor_surfaces.len();
-                let surface = MonitorSurface::new(&ctx, output, monitor, surface_idx);
-                self.monitor_surfaces.push(surface);
-            }
+            let surface_idx = self.monitor_surfaces.len();
+            let surface = MonitorSurface::new(&ctx, &monitor.output, monitor, surface_idx);
+            self.monitor_surfaces.push(surface);
         }
 
         if self.monitor_surfaces.is_empty() {
@@ -396,16 +407,6 @@ impl WaylandApp {
         Some(monitor_idx)
     }
 
-    fn update_pointer_from_hyprland(&mut self) -> bool {
-        let Some((x, y)) = get_hyprland_cursor_position() else {
-            return false;
-        };
-        self.pointer_x = x;
-        self.pointer_y = y;
-        self.pointer_valid = true;
-        true
-    }
-
     fn draw_monitor(&mut self, idx: usize, _qh: &QueueHandle<Self>) {
         // Check if redraw is needed
         {
@@ -424,6 +425,21 @@ impl WaylandApp {
             return;
         };
 
+        let active_measurement_size = if self.is_dragging {
+            self.drag_start.map(|(start_x, start_y)| {
+                logical_rect_size(start_x, start_y, self.pointer_x, self.pointer_y)
+            })
+        } else {
+            None
+        };
+        let completed_measurement_size = if self.is_dragging {
+            None
+        } else {
+            self.drag_rect.map(|(gx1, gy1, gx2, gy2)| {
+                logical_rect_size(gx1 as f64, gy1 as f64, gx2 as f64, gy2 as f64)
+            })
+        };
+
         // Collect data we need from the monitor before mutable borrow
         let (
             phys_width,
@@ -432,7 +448,9 @@ impl WaylandApp {
             contains_cursor,
             cursor_phys,
             active_drag_rect,
+            active_measurement_size,
             completed_drag_rect,
+            completed_measurement_size,
         ) = {
             let monitor = &self.monitor_surfaces[idx];
             let phys_width = monitor.phys_width;
@@ -455,7 +473,6 @@ impl WaylandApp {
             } else {
                 None
             };
-
             let completed_drag_rect = if self.is_dragging {
                 None
             } else {
@@ -463,7 +480,6 @@ impl WaylandApp {
                     monitor.global_rect_to_local_physical(gx1, gy1, gx2, gy2)
                 })
             };
-
             (
                 phys_width,
                 phys_height,
@@ -471,7 +487,9 @@ impl WaylandApp {
                 contains_cursor,
                 cursor_phys,
                 active_drag_rect,
+                active_measurement_size,
                 completed_drag_rect,
+                completed_measurement_size,
             )
         };
 
@@ -517,29 +535,33 @@ impl WaylandApp {
         pixmap.fill(tiny_skia::Color::TRANSPARENT);
 
         if self.is_dragging {
-            // Draw the active rectangle clipped to this monitor.
-            if let Some((left, top, right, bottom)) = active_drag_rect {
+            // Draw the active rectangle clipped to this monitor, while using
+            // the full global drag dimensions for the label.
+            if let (
+                Some((left, top, right, bottom)),
+                Some((measurement_width, measurement_height)),
+            ) = (active_drag_rect, active_measurement_size)
+            {
                 draw_rectangle_measurement(
                     pixmap,
-                    left,
-                    top,
-                    right,
-                    bottom,
+                    (left, top, right, bottom),
+                    (measurement_width, measurement_height),
                     self.font.as_ref(),
-                    scale,
                 );
             }
         } else {
-            // Draw the completed rectangle clipped to this monitor.
-            if let Some((left, top, right, bottom)) = completed_drag_rect {
+            // Draw the completed rectangle clipped to this monitor, while
+            // using the full global rectangle dimensions for the label.
+            if let (
+                Some((left, top, right, bottom)),
+                Some((measurement_width, measurement_height)),
+            ) = (completed_drag_rect, completed_measurement_size)
+            {
                 draw_rectangle_measurement(
                     pixmap,
-                    left,
-                    top,
-                    right,
-                    bottom,
+                    (left, top, right, bottom),
+                    (measurement_width, measurement_height),
                     self.font.as_ref(),
-                    scale,
                 );
             }
 
@@ -586,7 +608,7 @@ impl WaylandApp {
 
         // Composite overlay onto canvas
         let overlay_data = pixmap.data();
-        for (i, chunk) in canvas[..size].chunks_exact_mut(4).enumerate() {
+        for (i, chunk) in canvas[..size].as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let src_idx = i * 4;
             let alpha = overlay_data[src_idx + 3];
             if alpha > 0 {
@@ -921,7 +943,6 @@ impl PointerHandler for WaylandApp {
                     button: BTN_LEFT, ..
                 } => {
                     self.update_pointer_from_event(event);
-                    self.update_pointer_from_hyprland();
 
                     // Start drag
                     let had_drag_rect = self.drag_rect.is_some();
@@ -943,7 +964,6 @@ impl PointerHandler for WaylandApp {
                     button: BTN_LEFT, ..
                 } => {
                     self.update_pointer_from_event(event);
-                    self.update_pointer_from_hyprland();
 
                     // End drag - finalize rectangle only if it has size
                     if let Some((start_x, start_y)) = self.drag_start {

@@ -113,12 +113,9 @@ pub fn draw_measurements(
 
 pub fn draw_rectangle_measurement(
     pixmap: &mut Pixmap,
-    x1: u32,
-    y1: u32,
-    x2: u32,
-    y2: u32,
+    (x1, y1, x2, y2): (u32, u32, u32, u32),
+    (measurement_width, measurement_height): (u32, u32),
     font: Option<&fontdue::Font>,
-    scale: f64,
 ) {
     let left = x1 as f32;
     let top = y1 as f32;
@@ -165,10 +162,9 @@ pub fn draw_rectangle_measurement(
     // Right edge
     stroke_line(pixmap, &stroke_paint, &stroke, right, top, right, bottom);
 
-    // Draw dimension label (convert physical pixels to logical pixels)
-    let width = ((x2.saturating_sub(x1) + 1) as f64 / scale).round() as u32;
-    let height = ((y2.saturating_sub(y1) + 1) as f64 / scale).round() as u32;
-    // Use physical pixel sizes for layout threshold check
+    // Use physical pixel sizes for layout threshold check. The displayed
+    // dimensions come from the complete global rectangle, not this clipped
+    // monitor-local drawing rectangle.
     let phys_width = x2.saturating_sub(x1) + 1;
     let phys_height = y2.saturating_sub(y1) + 1;
     let (lx, ly) = if phys_width >= 150 && phys_height >= 50 {
@@ -187,7 +183,7 @@ pub fn draw_rectangle_measurement(
     };
     draw_label(
         pixmap,
-        &format!("{} x {}", width, height),
+        &format!("{} x {}", measurement_width, measurement_height),
         lx,
         ly,
         font,

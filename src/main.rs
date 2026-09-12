@@ -11,20 +11,21 @@ use wayland_handlers::WaylandApp;
 fn main() {
     let conn = Connection::connect_to_env().expect("Failed to connect to Wayland");
 
-    // Capture all monitors
-    let multi_capture = match capture_all_monitors(&conn) {
+    let (mut app, mut event_queue) = WaylandApp::new(&conn);
+
+    // Populate SCTK's output state, including xdg-output logical geometry.
+    event_queue.roundtrip(&mut app).unwrap();
+
+    let multi_capture = match capture_all_monitors(&conn, app.output_state()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Failed to capture monitors: {}", e);
             std::process::exit(1);
         }
     };
+    app.set_capture(multi_capture);
 
-    let (mut app, mut event_queue) = WaylandApp::new(&conn, multi_capture);
     let qh = event_queue.handle();
-
-    // Roundtrip to ensure outputs are populated before creating surfaces
-    event_queue.roundtrip(&mut app).unwrap();
 
     if let Err(e) = app.create_surfaces(&qh) {
         eprintln!("Failed to create monitor surfaces: {}", e);
